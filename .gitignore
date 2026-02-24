@@ -1,0 +1,14 @@
+__pycache__
+.env
+venv
+data
+dist
+build
+output
+*.spec
+*.exe
+*.ipynb
+*.cfg
+.xlsx
+.csv
+.json
