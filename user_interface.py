@@ -11,6 +11,7 @@ import threading
 from transform.dedupe_rc_data import remove_rc_duplicates
 from main import main as run_tool
 from transform.grab_new_deals_id import main as grab_new_deals_id
+from user_input.update_pipeline_json import update_pipeline_json_from_xlsx
 
 
 customtkinter.set_appearance_mode("System")  # Modes: "System" (standard), "Dark", "Light"
@@ -58,7 +59,7 @@ class App(customtkinter.CTk):
         """"""""""""""""""""""""
 
         # configure window
-        self.title("JC Tool")
+        self.title("JC Tool v2.0.0")
         self.geometry(self.center_main_window(800, 580))
         self.resizable(False, False)
         self.iconbitmap("misc/tool_icon.ico")
@@ -159,6 +160,17 @@ class App(customtkinter.CTk):
                                                            command=self.add_pipeline)
         self.add_pipeline_button.grid(row=2, column=0, padx=20, pady=(15, 5), sticky="ew")
 
+        # ✅ Update pipeline button (NEW)
+        self.update_pipeline_button = customtkinter.CTkButton(self.sidebar_frame,
+                                                            text='Update Pipeline',
+                                                            fg_color='#5b5c5c',
+                                                            hover_color='#424343',
+                                                            font=customtkinter.CTkFont(weight='normal',
+                                                                                        family='Roboto Regular',
+                                                                                        size=12),
+                                                            command=self.update_pipeline)
+        self.update_pipeline_button.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+
         # Delete pipeline button
         self.delete_pipeline_button = customtkinter.CTkButton(self.sidebar_frame,
                                                               text='Remove Pipeline',
@@ -168,7 +180,7 @@ class App(customtkinter.CTk):
                                                                                          family='Roboto Regular',
                                                                                          size=12),
                                                               command=self.delete_pipeline_window_func)
-        self.delete_pipeline_button.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+        self.delete_pipeline_button.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
 
         # Reset pipeline button
         self.reset_pipeline_button = customtkinter.CTkButton(self.sidebar_frame,
@@ -179,7 +191,7 @@ class App(customtkinter.CTk):
                                                              font=customtkinter.CTkFont(weight='normal',
                                                                                         family='Roboto Regular',
                                                                                         size=12))
-        self.reset_pipeline_button.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
+        self.reset_pipeline_button.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
 
         # Check all pipeline conditions
         self.check_all_pipeline_conditions_button = customtkinter.CTkButton(self.sidebar_frame,
@@ -190,7 +202,7 @@ class App(customtkinter.CTk):
                                                                             font=customtkinter.CTkFont(weight='normal',
                                                                                                        family='Roboto Regular',
                                                                                                        size=12))
-        self.check_all_pipeline_conditions_button.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
+        self.check_all_pipeline_conditions_button.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
 
         # Remove rc duplicates button
         self.remove_rc_duplicate_button = customtkinter.CTkButton(self.sidebar_frame,
@@ -201,7 +213,7 @@ class App(customtkinter.CTk):
                                                                   font=customtkinter.CTkFont(weight='normal',
                                                                                              family='Roboto Regular',
                                                                                              size=12))
-        self.remove_rc_duplicate_button.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
+        self.remove_rc_duplicate_button.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
 
         # Save data button
         self.save_data_button = customtkinter.CTkButton(self.sidebar_frame,
@@ -212,23 +224,191 @@ class App(customtkinter.CTk):
                                                         font=customtkinter.CTkFont(weight='normal',
                                                                                    family='Roboto Regular',
                                                                                    size=12))
-        self.save_data_button.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
+        self.save_data_button.grid(row=8, column=0, padx=20, pady=5, sticky="ew")
 
         # Sideframe appreance mode
         self.current_appearance_mode = customtkinter.get_appearance_mode()
         self.appearance_mode_label = customtkinter.CTkLabel(self.sidebar_frame, text="Appearance Mode:", anchor="w")
-        self.appearance_mode_label.grid(row=8, column=0, padx=20, pady=(10, 0))
+        self.appearance_mode_label.grid(row=9, column=0, padx=20, pady=(10, 0))
         self.appearance_mode_optionemenu = customtkinter.CTkOptionMenu(self.sidebar_frame,
                                                                        values=["System", "Dark", 'Light'],
                                                                        command=self.change_appearance_mode_event)
-        self.appearance_mode_optionemenu.grid(row=9, column=0, padx=20, pady=(10, 10))
+        self.appearance_mode_optionemenu.grid(row=10, column=0, padx=20, pady=(10, 10))
 
 
     
     """"""""""""""""""""""""""""""
     #    MAIN FUNCTION METHODS   #
     """"""""""""""""""""""""""""""
-    
+    def rebuild_pipeline_buttons(self):
+        # Destroy existing pipeline buttons
+        for key in list(self.pipeline_buttons.keys()):
+            try:
+                self.pipeline_buttons[key].destroy()
+            except Exception:
+                pass
+        self.pipeline_buttons = {}
+
+        # Re-create from refreshed self.user_desgination
+        for key, value in self.user_desgination.items():
+            self.create_pipeline_buttons(key, value)
+
+
+    def update_pipeline(self) -> None:
+        # Prevent multiple runs
+        if getattr(self, "_update_pipeline_running", False):
+            return
+        self._update_pipeline_running = True
+
+        # Disable button while running
+        try:
+            self.update_pipeline_button.configure(state="disabled")
+        except Exception:
+            pass
+
+        # Popup: "Updating..."
+        self.update_pipeline_window = customtkinter.CTkToplevel(self)
+        self.update_pipeline_window.geometry("420x160")
+        self.update_pipeline_window.title("Update Pipeline")
+        self.update_pipeline_window.attributes("-topmost", True)
+        self.update_pipeline_window.resizable(False, False)
+        self.update_pipeline_window.grid_columnconfigure(0, weight=1)
+        self.update_pipeline_window.grid_rowconfigure(0, weight=1)
+
+        # Make it act like a modal dialog
+        try:
+            self.update_pipeline_window.transient(self)
+            self.update_pipeline_window.grab_set()
+        except Exception:
+            pass
+
+        # Don't allow closing mid-run (avoids confusion)
+        self.update_pipeline_window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        center_new_window(self, self.update_pipeline_window)
+
+        label = customtkinter.CTkLabel(
+            self.update_pipeline_window,
+            text="Updating pipeline JSON files...\nPlease wait.",
+            font=customtkinter.CTkFont(family="Roboto Regular", size=16)
+        )
+        label.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+
+        # Run the update in a thread so UI won't freeze
+        threading.Thread(target=self._run_update_pipeline, daemon=True).start()
+
+
+    def _run_update_pipeline(self) -> None:
+        try:
+            xlsx_path = "data/conditions_input/Pipedrive Stages - Stages.xlsx"
+            out_dir = "data/conditions_input"
+
+            # Clearer error if file is missing
+            if not os.path.exists(xlsx_path):
+                raise FileNotFoundError(
+                    f"Missing required file:\n{xlsx_path}\n\n"
+                    f"Make sure the XLSX is in the correct folder."
+                )
+
+            # 1) Rebuild JSONs from XLSX
+            update_pipeline_json_from_xlsx(
+                xlsx_path=xlsx_path,
+                out_dir=out_dir,
+            )
+
+            # 2) Re-read JSONs into app memory
+            self.user_desgination, self.conditions_dict = self.read_conditions_designations()
+
+            # 3) Refresh UI back on the main thread
+            self.after(0, self._finish_update_pipeline_success)
+
+        except Exception as e:
+            self.after(0, lambda: self._finish_update_pipeline_failed(str(e)))
+
+    def _finish_update_pipeline_success(self):
+        # Close "Updating..." window
+        if hasattr(self, "update_pipeline_window"):
+            try:
+                self.update_pipeline_window.destroy()
+            except Exception:
+                pass
+
+        # Rebuild left pipeline buttons
+        self.rebuild_pipeline_buttons()
+
+        # Refresh right panel display (show first pipeline if exists)
+        if self.user_desgination:
+            first_key = min(self.user_desgination.keys())
+            self.display_assigned_user_followup(first_key)
+
+        # Re-enable Update button + clear running flag
+        self._update_pipeline_running = False
+        try:
+            self.update_pipeline_button.configure(state="normal")
+        except Exception:
+            pass
+
+        # Confirmation popup
+        ok = customtkinter.CTkToplevel(self)
+        ok.pack_propagate(True)
+        ok.attributes("-topmost", True)
+        ok.title("Update Pipeline")
+
+        # Modal-ish behavior
+        try:
+            ok.transient(self)
+            ok.grab_set()
+        except Exception:
+            pass
+
+        center_new_window(self, ok)
+
+        lbl = customtkinter.CTkLabel(ok, text="✅ Pipeline JSON files updated successfully.")
+        lbl.pack(padx=20, pady=20)
+
+        btn = customtkinter.CTkButton(ok, text="OK", command=ok.destroy)
+        btn.pack(padx=20, pady=(0, 20))
+
+    def _finish_update_pipeline_failed(self, err_msg: str):
+        # Close "Updating..." window
+        if hasattr(self, "update_pipeline_window"):
+            try:
+                self.update_pipeline_window.destroy()
+            except Exception:
+                pass
+
+        # Re-enable Update button + clear running flag
+        self._update_pipeline_running = False
+        try:
+            self.update_pipeline_button.configure(state="normal")
+        except Exception:
+            pass
+
+        fail = customtkinter.CTkToplevel(self)
+        fail.pack_propagate(True)
+        fail.attributes("-topmost", True)
+        fail.title("Update Pipeline Failed")
+
+        # Modal-ish behavior
+        try:
+            fail.transient(self)
+            fail.grab_set()
+        except Exception:
+            pass
+
+        center_new_window(self, fail)
+
+        lbl = customtkinter.CTkLabel(
+            fail,
+            text=f"Update failed.\n\n{err_msg}",
+            wraplength=420
+        )
+        lbl.pack(padx=20, pady=20)
+
+        btn = customtkinter.CTkButton(fail, text="OK", command=fail.destroy)
+        btn.pack(padx=20, pady=(0, 20))
+
+
     # Change appearance mode of app
     def change_appearance_mode_event(self, new_appearance_mode: str) -> None:
         customtkinter.set_appearance_mode(new_appearance_mode)
@@ -1825,19 +2005,11 @@ class App(customtkinter.CTk):
 
         return user_designation, condition_dict
     
-    def center_main_window(
-            screen: customtkinter.CTkFrame,
-            width: int,
-            height: int) -> str:
-
-        # Get width and height of main window
-        screen_width = screen.winfo_screenwidth()
-        screen_height = screen.winfo_screenheight()
-
-        # Calculate position to center window
-        x = int((screen_width/2) - (width/2))
-        y = int((screen_height/2) - (height/1.5))
-
+    def center_main_window(self, width: int, height: int) -> str:
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = int((screen_width / 2) - (width / 2))
+        y = int((screen_height / 2) - (height / 1.5))
         return f"{width}x{height}+{x}+{y}"
 
     def extract_pipedrive_stages(self) -> dict:
