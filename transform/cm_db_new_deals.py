@@ -1,7 +1,7 @@
 import pandas as pd
 
 
-def search_ani(final_result_not_exist: pd.DataFrame, phone_number_df: pd.DataFrame) -> 'tuple[pd.DataFrame, pd.DataFrame]':
+def search_ani(bottoms_up_not_exist: pd.DataFrame, phone_number_df: pd.DataFrame) -> 'tuple[pd.DataFrame, pd.DataFrame]':
     '''
     Searches the ANI Numbers to CM Database, whose numbers are not existing in Pipedrive Data.\n
 
@@ -15,23 +15,36 @@ def search_ani(final_result_not_exist: pd.DataFrame, phone_number_df: pd.DataFra
     '''
 
     # Filter entries where it is not Bottoms Up
-    cm_db_ani_entries = final_result_not_exist[~final_result_not_exist['Team'].str.contains('Bottoms Up', na=False)][['ANI', 'Date and Time', 'Team', 'Date', 'Time', 'Contact ID']]
+    cm_db_ani_entries = bottoms_up_not_exist
     cm_db_ani_entries = cm_db_ani_entries[(cm_db_ani_entries['ANI'] != '(blank)') & (cm_db_ani_entries['ANI']).notnull()]
-    # phone_number_df['phone_number'] = phone_number_df[phone_number_df['phone_number'] \
-    #                                                   .str.contains(r'^[0-9]+$', na=False)] \
-    #                                                     ['phone_number'].astype('Int64')
     
     # Search ANI if existing in CM Database
     cm_db_check_ani = cm_db_ani_entries.merge(phone_number_df,
                                             left_on='ANI',
                                             right_on='phone_number',
                                             how='left')
+    # Remove duplicates by From
+    cm_db_check_ani.drop_duplicates(subset=['ANI'], inplace=True)
+
+    # Keep only one phone_number column
+    if 'phone_number_x' in cm_db_check_ani.columns and 'phone_number_y' in cm_db_check_ani.columns:
+        # Prioritize the one that matched via 'From'
+        cm_db_check_ani['phone_number'] = cm_db_check_ani['phone_number_x'].combine_first(cm_db_check_ani['phone_number_y'])
+        cm_db_check_ani.drop(columns=['phone_number_x', 'phone_number_y'], inplace=True)
+    elif 'phone_number_x' in cm_db_check_ani.columns:
+        cm_db_check_ani.rename(columns={'phone_number_x': 'phone_number'}, inplace=True)
+    elif 'phone_number_y' in cm_db_check_ani.columns:
+        cm_db_check_ani.rename(columns={'phone_number_y': 'phone_number'}, inplace=True)
+
     # cm_db_check_ani.drop_duplicates(subset=['ANI'], inplace=True)
     cm_db_exist = cm_db_check_ani[cm_db_check_ani['id'].notnull()]
     cm_db_not_exist = cm_db_check_ani[cm_db_check_ani['id'].isna()][['ANI', 'Date and Time', 'Team', 'Date', 'Time', 'Contact ID']]
-    cm_db_not_exist['Deal - Deal Summary'] = 'No Information in Email'
+
+    cm_db_not_exist_final = cm_db_ani_entries[
+        ~cm_db_ani_entries['ANI'].isin(cm_db_exist['ANI'])
+    ].copy()
     
-    return cm_db_exist, cm_db_not_exist
+    return cm_db_exist, cm_db_not_exist_final
 
 
 def add_email_columns(cm_db_exist: pd.DataFrame, email_address_df: pd.DataFrame) -> pd.DataFrame:
@@ -166,18 +179,6 @@ def add_deal_title(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
     Return:
         `cm_db_final_df (pd.DataFrame)` - Reference variable of a Pandas DataFrame with added `Deal - Title` column.\n
     '''
-    
-    # cm_db_final_df['first_last'] = cm_db_final_df.apply(
-    #     lambda row: ' '.join(filter(None,
-    #                                 [row['first_name'].capitalize() if pd.notnull(row['first_name']) else '',
-    #                                 row['last_name'].capitalize() if pd.notnull(row['last_name']) else ''])) if pd.notnull(row['first_name']) or pd.notnull(row['last_name']) else None,
-    #     axis=1
-    # )
-
-    # cm_db_final_df['Deal - Title'] = cm_db_final_df.apply(
-    #     lambda row: f"{row['first_last']} {row['country']} County, {row['state']}",
-    #     axis=1
-    # )
 
     # Combine first and last name and assign to column
     cm_db_final_df['first_last'] = cm_db_final_df.apply(lambda row: 
@@ -208,29 +209,6 @@ def add_deal_title(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
     final_result['Deal - Title'] = final_result.apply(lambda row: f"{row['first_last']} {row['formatted_result']}", axis=1)
     cm_db_final_df = cm_db_final_df.merge(final_result[['phone_number', 'Deal - Title']], on='phone_number', how='left')
 
-    # # Define Pandas Function that will create deal title
-    # def check_name_address(row):
-    #     if row['first_last'].nunique() == 0:
-    #         return None
-    #     elif row['first_last'].nunique() == 1:
-    #         counties = row['country'].unique()
-    #         state = row['state'].iloc[0]
-    #         if len(counties) == 1:
-    #             return f"{row['first_last'].iloc[0]} {counties[0].title()} County, {state}"
-    #         elif len(counties) == 2:
-    #             return f"{row['first_last'].iloc[0]} {counties[0].title()} and {counties[1].title()} County, {state}"
-    #         else:
-    #             # counties_list = ', '.join(counties[:-1])
-    #             counties_list = ', '.join([county.title() for county in counties[:-1]])
-    #             return f"{row['first_last'].iloc[0]} {counties_list}, and {counties[-1].title()} County, {state}"
-    #     else:
-    #         return f"Mutiple entries {row['ANI'].iloc[0]}"
-
-    # # Apply Pandas Function and assign to a column
-    # deal_title_columns = cm_db_final_df.groupby('phone_number').apply(check_name_address).reset_index()
-    # deal_title_columns.columns = ['phone_number', 'Deal - Title']
-    # cm_db_final_df = cm_db_final_df.merge(deal_title_columns, on='phone_number', how='left')
-
     return cm_db_final_df
 
 
@@ -245,11 +223,6 @@ def add_deal_county(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
         `cm_db_final_df (pd.DataFrame)` - Reference variable of a Pandas DataFrame with added `Deal - County` column.\n
     '''
 
-    # cm_db_final_df['Deal - County'] = cm_db_final_df.apply(
-    #     lambda row: f"{row['country']} County, {row['state']}, USA",
-    #     axis=1
-    # )
-
     # Define pandas function that will create deal county column
     def add_county(group):
 
@@ -258,11 +231,6 @@ def add_deal_county(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
         country_list = group['country'].tolist()
         state_list = group['state'].tolist()
 
-        #     if len(country_list) == 1:
-        #         result = f"{country_list[0].title()} County, {state_list[0].title()}"
-        #     elif len(country_list) == 2:
-        #         result = f"{country_list[0].title()} County, {state_list[0].title()} | {country_list[1].title()} County, {state_list[1].title()}"
-        #     else:
         # Create a set of unique (country, state) pairs
         unique_combinations = set((country.title(), state) for country, state in zip(country_list, state_list))
 
@@ -271,17 +239,6 @@ def add_deal_county(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
 
         return result
 
-        # elif group['state'].nunique() == 1:
-        #     counties = group['country'].unique()
-        #     state = group['state'].iloc[0]
-        #     if len(counties) == 1:
-        #         return f"{counties[0].title()} County, {state}"
-        #     elif len(counties) == 2:
-        #         return f"{counties[0].title()} and {counties[1].title()} County, {state}"
-        #     else:
-        #         # counties_list = ', '.join(counties[:-1])
-        #         counties_list = ', '.join([county.title() for county in counties[:-1]])
-        #         return f"{counties_list}, and {counties[-1].title()} County, {state}"
 
     # Create the "Deal - County" for unique phone numbers
     unique_deals = cm_db_final_df.groupby('phone_number').apply(add_county).reset_index()
@@ -302,21 +259,29 @@ def add_mailing_address(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
         `cm_db_final_df (pd.DataFrame)` - Reference variable of a Pandas DataFrame with added `Person - Mailing Address` column.\n
     '''
 
-    # cm_db_final_df['Person - Mailing Address'] = cm_db_final_df.apply(
-    #     lambda row: f"{row['address']}, {row['city']}, {row['state']}, {row['postal_code']}, USA",
-    #     axis=1
-    # )
-
     # Define pandas function that will create person mailing address
     def add_mailing_address(row):
+        def clean(val):
+            if pd.isna(val) or val is None or str(val).strip() == "":
+                return ""
+            return str(val).strip()
 
         if row['address'].nunique() == 0:
             return None
         elif row['address'].nunique() == 1:
-            if row['address'].iloc[0] != '':
-                return f"{row['address'].iloc[0]}, {row['city'].iloc[0]}, {row['state_address'].iloc[0]}, {row['postal_code'].iloc[0]}, USA"
-            else:
+            address = clean(row['address'].iloc[0])
+
+            if not address:
                 return None
+
+            city = clean(row['city'].iloc[0])
+            state = clean(row['state_address'].iloc[0])
+            postal_code = clean(row['postal_code'].iloc[0])
+
+            parts = [address, city, state, postal_code, "USA"]
+            parts = [p for p in parts if p]
+
+            return ", ".join(parts)
         else:
             return "Multiple address entries"
     
@@ -360,18 +325,6 @@ def add_person_name(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
         `cm_db_final_df (pd.DataFrame)` - Dataframe with added `Person - Name` column.\n
     '''
 
-    # Create pandas function to add Person - Name column
-    # def full_name_check(row):
-    #     if pd.isnull(row['middle_name']) and pd.isnull(row['last_name']):
-    #         return row['first_name'].capitalize()
-    #     elif pd.isnull(row['middle_name']) or row['middle_name'].lower() == '(empty)':
-    #         return f"{row['first_name'].capitalize()} {row['last_name'].capitalize()}"
-    #     else:
-    #         return f"{row['first_name'].capitalize()} {row['middle_name'].capitalize()} {row['last_name'].capitalize()}"
-
-    # # Apply pandas function and assign to column
-    # cm_db_final_df['Person - Name'] = cm_db_final_df.apply(full_name_check, axis=1)
-
     # Define pandas function that will create person name
     def process_names(row):
         first_name = row['first_name']
@@ -413,11 +366,13 @@ def add_marketing_medium(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
 
     # Create pandas function that will add marketing medium column to the final dataframe
     def marketing_medium(row):
-        if row['Team'] == 'Ringless Voicemail - LG':
+        team = row.get('Team')
+
+        if team in ('Ringless Voicemail - LG', 'RVM - LG'):
             return 'RVM'
-        elif row['Team'] == 'Call Center':
+        elif team == 'Call Center':
             return 'Direct Mail'
-        elif row['Team'] == 'Lead Generation':
+        elif team in ('Lead Generation', 'LG'):
             return 'Cold Call'
         else:
             return 'Direct Mail'
@@ -497,8 +452,8 @@ def filter_multiple_entries(cm_db_final_df: pd.DataFrame, cm_db_not_exist: pd.Da
     return single_entries_df, cm_db_not_exist_final
 
 
-def create_new_deals_cm(cm_db_exist: pd.DataFrame,
-                        cm_db_not_exist: pd.DataFrame,
+def create_new_deals_cm(bottoms_up_not_exist: pd.DataFrame,
+                        phone_number_df: pd.DataFrame,
                         email_address_df: pd.DataFrame,
                         serial_numbers_df: pd.DataFrame,
                         cm_db_df: pd.DataFrame) -> 'tuple[pd.DataFrame, pd.DataFrame | None]':
@@ -564,17 +519,15 @@ def create_new_deals_cm(cm_db_exist: pd.DataFrame,
         'Person - Timezone'
     ]
 
-    # if ani_not_exist.empty:
-    #     return pd.DataFrame(columns=columns), pd.DataFrame(), pd.DataFrame()
-
-    # # Search ANI Numbers in Community Minerals Database
-    # cm_db_exist, cm_db_not_exist = search_ani(ani_not_exist, phone_number_df)
-
-    if cm_db_exist.empty:
-        return cm_db_not_exist, pd.DataFrame(), pd.DataFrame() # Return empty dataframe if cm_db_exist is empty
+    if bottoms_up_not_exist.empty:
+        return pd.DataFrame(columns=columns), pd.DataFrame(), pd.DataFrame() 
     
     else:
-
+        cm_db_exist, cm_db_not_exist = search_ani(bottoms_up_not_exist, phone_number_df)
+        
+        if cm_db_exist.empty:
+            return cm_db_not_exist, pd.DataFrame(), pd.DataFrame()
+        
         cm_db_exist['Deal - Deal creation date'] = cm_db_exist['Date and Time']
 
         added_email_df = add_email_columns(cm_db_exist, email_address_df)

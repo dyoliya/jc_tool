@@ -7,54 +7,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import pandas as pd
 
 
-def search_ani_old(abandoned_df: pd.DataFrame, pipedrive_df: pd.DataFrame) -> pd.DataFrame:
-    '''
-    Search ANI Number from Abandoned Calls Dataframe if it is exisitng in Pipedrive Dataframe.
-    This function will return ONLY EXISTING entries.\n
-
-    Parameters:
-        `abandoned_df` - Reference variable for abandoned_calls Pandas Dataframe\n
-        `pipedrive_df` - Reference variable for pipedrive Pandas Dataframe\n
-
-    Return:
-        `deal_id_seach_result` - Reference variable for Pandas Dataframe of entries of ANI that is existing in
-        pipedrive dataframe.\n
-    '''
-
-    
-    # Split and Explode the multiple `phone numbers` of user per abandoned call
-    # and assign it to new column `phone_list`
-    pipedrive_df['phone_list'] = pipedrive_df['Person - Phone - Work'].str.split(', ')
-    phone_list_exploded = pipedrive_df.explode('phone_list')
-    abandoned_df['ANI'] = abandoned_df['ANI'].astype(str)
-    number_search_result = abandoned_df[abandoned_df['ANI'].isin(phone_list_exploded['phone_list'])] # search ANI in pipedrive dataframe
-    pd.options.mode.chained_assignment = None
-
-
-    # Split and Explode the multiple `deal id` of user per abandoned call
-    # and assign it to new column `deal_id_list`
-    number_search_result['Deal ID'] = number_search_result['Deal ID'].astype(str)
-    number_search_result['new_deal_id'] = number_search_result[number_search_result['Deal ID'].str.contains(r'^[0-9\s|]+$')][['Deal ID']]
-    number_search_result['new_deal_id'] = number_search_result['new_deal_id'].str.split('|')
-    deal_list_exploded = number_search_result.explode('new_deal_id')
-    deal_list_exploded['new_deal_id'] = deal_list_exploded['new_deal_id'].str.strip() # remove leading and trailing whitespaces
-
-
-    #Extract needed columns and merge two dataframe on `deal_id` column
-    phone_list_exploded['Deal - ID'] = phone_list_exploded['Deal - ID'].astype(str)
-    pipedrive_final_data = phone_list_exploded[['Deal - ID', 'Deal - Owner', 'Deal - Pipeline', 'Deal - Stage', 'Deal - CA Tracking Flag']]
-    calls_final_data = deal_list_exploded[['new_deal_id', 'ANI', 'Date and Time', 'Date']]
-    deal_id_search_result = pipedrive_final_data.merge(calls_final_data,
-                                                    left_on='Deal - ID',
-                                                    right_on='new_deal_id',
-                                                    how='right') # search existing Deal ID in pipedrive dataframe
-    
-    # Rename `Deal - ID` to `Deal ID`
-    deal_id_search_result.rename(columns={'Deal - ID': 'Deal ID'}, inplace=True)
-
-    return deal_id_search_result
-
-
 def search_ani(abandoned_df: pd.DataFrame, pipedrive_df: pd.DataFrame) -> 'tuple[pd.DataFrame, pd.DataFrame]':
     '''
     Search ANI Number from Abandoned Calls Dataframe if it is exisitng in Pipedrive Dataframe.
@@ -76,19 +28,6 @@ def search_ani(abandoned_df: pd.DataFrame, pipedrive_df: pd.DataFrame) -> 'tuple
     # phone_columns.extend(['Person - Phone - Other', 'Person - Phone - Home', 'Person - Phone - Mobile'])
     pd.options.mode.chained_assignment = None
 
-    # # Create a reshaped phone number table where phone number per deal id is listed
-    # pipedrive_melted = pd.melt(pipedrive_df,
-    #                         id_vars=['Deal - ID'],
-    #                         value_vars=phone_columns,
-    #                         var_name='phone_type',
-    #                         value_name='phone_number')
-
-    # phone_columns = [f'Person - Phone {i}' for i in range(1, 11)]
-    # phone_columns.extend(['Person - Phone - Other', 'Person - Phone - Home', 'Person - Phone - Mobile', 'Person - Phone - Work'])
-
-    # pipedrive_df[phone_columns] = pipedrive_df[phone_columns].applymap(lambda x: x.replace(' ', '').strip() if isinstance(x, str) else '')
-
-    # pipedrive_df['phone_number'] = pipedrive_df[phone_columns].apply(lambda row: ','.join(filter(None, row)), axis=1)
     pipedrive_df['phone_number'] = pipedrive_df['phone_number'].fillna('')
     pipedrive_df = pipedrive_df[pipedrive_df['phone_number'].str.strip() != '']
     pipedrive_df['phone_number'] = pipedrive_df['phone_number'].str.split(',')
@@ -97,8 +36,9 @@ def search_ani(abandoned_df: pd.DataFrame, pipedrive_df: pd.DataFrame) -> 'tuple
 
     # Select columns needed
     # pipedrive_selected_cols = pipedrive_df # [['Deal - ID', 'Deal - Owner', 'Deal - Pipeline', 'Deal - Stage', 'Deal - CA Tracking Flag']]
-    abandoned_df_selected_cols = abandoned_df[['ANI', 'Date and Time', 'Team', 'Date', 'Time', 'Contact ID']]
-    
+
+    abandoned_df_selected_cols = abandoned_df[abandoned_df['Deal ID'].isna()][['ANI', 'Date and Time', 'Team', 'Date', 'Time', 'Contact ID']]
+
     # # Add pipedrive details per deal id
     # pipedrive_final_data = pipedrive_melted.merge(pipedrive_selected_cols,
     #                                             on='Deal - ID',
@@ -115,6 +55,8 @@ def search_ani(abandoned_df: pd.DataFrame, pipedrive_df: pd.DataFrame) -> 'tuple
     
     # Search existing ANI numbers in pipedrive final data
     abandoned_df_selected_cols['ANI'] = abandoned_df_selected_cols['ANI'].astype(str)
+    mask = abandoned_df_selected_cols['ANI'].str.len() == 11
+    abandoned_df_selected_cols.loc[mask, 'ANI'] = abandoned_df_selected_cols.loc[mask, 'ANI'].str[1:].str.strip()
     merged_calls_pipedrive = abandoned_df_selected_cols.merge(df_exploded,
                                                     left_on='ANI',
                                                     right_on='phone_number',

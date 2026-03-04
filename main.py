@@ -8,11 +8,13 @@ from user_input.parallel_get import main as update_pipedrive_data
 import json
 from sqlalchemy import create_engine
 import pandas as pd
+import numpy as np
 import sqlite3
 import os
 import warnings
 from urllib.parse import quote
 
+warnings.simplefilter(action='ignore', category=FutureWarning)
 # Helper functions
 def get_input_files() -> 'tuple[list, list]':
     '''
@@ -73,7 +75,7 @@ def read_bottoms_up(bottoms_up_db: str) -> pd.DataFrame:
 
         # Execute query and fetch the data into a Pandas Dataframe
         df = pd.read_sql_query('SELECT * FROM bottoms_up', connection)
-        df['id'] = df.index
+        # df['id'] = df.index
         df.rename(columns={
             'Owner': 'owner',
             'First Name': 'first_name',
@@ -99,7 +101,12 @@ def read_bottoms_up(bottoms_up_db: str) -> pd.DataFrame:
             'md_state': 'state2',
             'md_postalcode': 'postal_code2'
         }, inplace=True)
-        
+
+        # ✅ Convert phone1–phone5 to Int64 safely
+        for col in ['phone1', 'phone2', 'phone3', 'phone4', 'phone5']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').astype('Int64')
+
         return df
     
     except Exception as e:
@@ -146,47 +153,6 @@ def read_cm_live_db(host: str,
 
     finally:
         engine.dispose()
-
-
-def read_cm_db(cm_db: str) -> 'tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None]':
-    '''
-    Read and extract data from Community Minerals Database.
-
-    Parameters:
-        `cm_db` - File name of CM Database file.\n
-
-    Return:
-        `phone_number_df (pd.DataFrame)` - Pandas DataFrame that contains all phone numbers with corresponding database id.\n
-        `email_address_df (pd.DataFrame)` - Pandas DataFrame that contains all emaill addresses with corresponding database id.\n
-        `serial_numbers_df (pd.DataFrame)` - Pandas DataFrame that contains all serial numbers with corresponding database id.\n
-        `cm_db_df (pd.DataFrame)` - Pandas DataFrame that contains all other columns needed for the final output file.\n
-    '''
-
-    try:
-        # Connect to SQLite Database
-        connection = sqlite3.connect(cm_db)
-
-        print(f'Reading Community Minerals Database.')
-
-        # Execute query and fetch the data into a Pandas Dataframe
-        phone_number_df = pd.read_sql_query(phone_number_query, connection)
-        emaiL_address_df = pd.read_sql_query(email_address_query, connection)
-        serial_numbers_df = pd.read_sql_query(serial_numbers_query, connection)
-        cm_db_df = pd.read_sql_query(cm_db_query, connection)
-
-        # Change data type of phone number to int
-        phone_number_df['phone_number'] = phone_number_df[phone_number_df['phone_number'] \
-                                                          .str.contains(r'^[0-9]+$', na=False)] \
-                                                            ['phone_number'].astype('Int64')
-
-        return phone_number_df, emaiL_address_df, serial_numbers_df, cm_db_df
-    
-    except Exception as e:
-        print(f'Error occured during reading of database: {e}')
-        return None
-
-    finally:
-        connection.close()
 
 def read_json_data():
 
@@ -524,7 +490,24 @@ def get_cm_deal_id(
 
     return fu_final_df, no_deal_id_final, cm_db_not_exist
 
+def log_step(step_name, **dfs):
+    print(f"\n=== {step_name} ===")
+    for name, df in dfs.items():
+        if df is None:
+            print(f"{name}: 0 rows")
+        else:
+            try:
+                print(f"{name}: {len(df)} rows")
+            except Exception:
+                print(f"{name}: {type(df)} (no len available)")
 
+def normalize_phone(phone):
+    if pd.isna(phone): return None
+    phone = str(phone)
+    phone = phone.replace('(', '').replace(')', '').replace('-', '').replace(' ', '')
+    if phone.startswith('1') and len(phone) == 11:
+        phone = phone[1:]
+    return phone.strip()
 
 def main():
     '''
@@ -556,15 +539,31 @@ def main():
 
         bottoms_up_db, cm_db = get_db_files(bottoms_up_path), get_db_files(cm_db_path) # Read and get database files
         bottoms_up_df = read_bottoms_up(bottoms_up_db) # Bottoms Up Dataframe
+
+        # Comment out if not for testing
+        # ----------- start here -----------        
         phone_number_df, email_address_df, serial_numbers_df, cm_db_df = read_cm_live_db(db_host,
                                                                                             db_port,
                                                                                             db_user,
                                                                                             db_password,
-                                                                                            db_name) # Live CM Database
-        
+                                                                                            db_name) # Live CM Database 
         # If database credentials is wrong
         if phone_number_df is None:
             return 'db_wrong'
+        # ----------- end here -----------   
+
+        # # Comment out for testing purposes only
+        # # ✅ Skip live CM DB read — use latest saved CSVs
+        # # ----------- start here -----------  
+        # print("Skipping live CM DB read. Loading from saved CSVs instead...")
+
+        # cm_db_path = 'data/database/cm_db'
+
+        # phone_number_df = pd.read_csv(os.path.join(cm_db_path, 'phone_number.csv'), low_memory=False)
+        # email_address_df = pd.read_csv(os.path.join(cm_db_path, 'email_address.csv'), low_memory=False)
+        # serial_numbers_df = pd.read_csv(os.path.join(cm_db_path, 'serial_number.csv'), low_memory=False)
+        # cm_db_df = pd.read_csv(os.path.join(cm_db_path, 'cm_db.csv'), low_memory=False)
+        # # ----------- end here -----------   
         
         file_count = 1 # Counter for Abandoned Calls File
         user_designation, condition_dict = read_json_data()
@@ -588,6 +587,8 @@ def main():
 
             # Create Follow Up output file
             ani_exist, ani_not_exist, df_exploded = search_ani(abandoned_calls_df, pipedrive_df)
+            log_step("Checking if PN exists in Pipedrive",
+                **{"PN Exist": ani_exist, "PN Not Exist": ani_not_exist})
 
             # Get Deal ID from cm database
             fu_final_df, cm_exist_df, cm_not_exist_df = get_cm_deal_id(ani_exist,
@@ -595,23 +596,27 @@ def main():
                                                                     phone_number_df,
                                                                     df_exploded,
                                                                     cm_db_df)
+            log_step("Get Deal ID from cm database", **{"Deals exist": fu_final_df})
 
             # Create FU Output
             rc_df = create_follow_up(fu_final_df, file_count, user_designation, condition_dict)
-
+            log_step("create_follow_up", **{"Follow-up": rc_df})
+            
             # Search in Bottoms Up Database
             bottoms_up_not_exist, bottoms_up_output, bottom_up_final_df = create_new_deals_bottoms_up(ani_not_exist,
                                                                                     bottoms_up_df,
                                                                                     file_count)
-            
+            log_step("New deals found in BUDB", **{"From BUDB": bottoms_up_output})
+
             # Search in Community Minerals Database
             cm_db_not_exist, cm_db_output, cm_db_final_df = create_new_deals_cm(
-                                                                cm_exist_df,
-                                                                cm_not_exist_df,
+                                                                bottoms_up_not_exist,
+                                                                phone_number_df,
                                                                 email_address_df,
                                                                 serial_numbers_df,
                                                                 cm_db_df)
-            
+            log_step("New deals found in .work", **{"From .work": cm_db_output})
+
             # Concatenate Bottoms Up and CM then create New Deals output file
             rc_added_new_deals_df = export_new_deals(bottoms_up_output,
                                                         cm_db_output,
@@ -622,9 +627,10 @@ def main():
             
             # Create No Result output file
             no_result_df = create_no_result(cm_db_not_exist,
-                                bottoms_up_not_exist,
+                                abandoned_calls_df,
                                 file_count)
-            
+            log_step("No results", **{"No results from all db": no_result_df})
+
             # Export all combined dataframes as RC Data
             export_rc_data(rc_added_new_deals_df, no_result_df, calls_file_name)
 

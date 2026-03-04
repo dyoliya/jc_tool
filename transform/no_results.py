@@ -14,7 +14,7 @@ def add_deal_title(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
 
     # Apply lambda function and assign to a column
     no_result_final_df['Deal - Title'] = no_result_final_df.apply(
-        lambda row: f"No Name {row['ANI']}",
+        lambda row: f"No Name {row['phone_number']}",
         axis=1
     )
 
@@ -31,19 +31,6 @@ def add_deal_label(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
     Return:
         `no_result_final_df (pd.DataFrame)` - Reference variable of a Pandas DataFrame with added `Deal - Label` column.\n
     '''
-
-    # no_result_final_df['Deal - Label'] = no_result_final_df.apply(
-    #     lambda row: 'BOTTOM UP OFFER' if 'Bottoms Up' in row['Team'] else '',
-    #     axis=1
-    # )
-
-    # return no_result_final_df
-
-    # no_result_final_df['Deal - Label'] = no_result_final_df.apply(
-    #     lambda row: 'BOTTOM UP OFFER' if row['Team'] in ['Bottoms Up - Mid',
-    #                                                     'Bottoms Up - Small',
-    #                                                     'Bottoms Up - RVM',
-    #                                                     'Bottoms Up - Sml'] else None, axis=1)
 
     # Apply function lambda function that will filter data from Bottoms Up and CM Database
     no_result_final_df['Deal - Label'] = no_result_final_df['Team'].apply(
@@ -90,11 +77,13 @@ def add_marketing_medium(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
 
     # Define pandas function will add marketing medium value
     def marketing_medium(row):
-        if row['Team'] == 'Ringless Voicemail - LG':
+        team = row.get('Team')
+
+        if team in ('Ringless Voicemail - LG', 'RVM - LG'):
             return 'RVM'
-        elif row['Team'] == 'Call Center':
+        elif team == 'Call Center':
             return 'Direct Mail'
-        elif row['Team'] == 'Lead Generation':
+        elif team in ('Lead Generation', 'LG'):
             return 'Cold Call'
         else:
             return 'Direct Mail'
@@ -118,7 +107,7 @@ def add_person_name(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
 
     # Apply lambda function and assign to a column
     no_result_final_df['Person - Name'] = no_result_final_df.apply(
-        lambda row: f"No Name {row['ANI']}",
+        lambda row: f"No Name {row['phone_number']}",
         axis=1
     )
 
@@ -138,7 +127,7 @@ def add_note_content(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
 
     # Apply lambda function and assign to a column
     no_result_final_df['Note Content'] = no_result_final_df.apply(
-        lambda row: f"JC abandoned call from {row['ANI']} on {row['Date and Time']}",
+        lambda row: f"JC abandoned call from {row['phone_number']} on {row['Date and Time']}",
         axis=1
     )
 
@@ -163,13 +152,13 @@ def add_constant_columns(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
     no_result_final_df['Deal - Deal Summary'] = no_result_final_df['Deal - Deal Summary']
     no_result_final_df['Deal - Pipedrive Analyst Tracking Flag'] = 'PA - Joyce'
     no_result_final_df['Deal - Phone Number Format'] = 'Complete'
-    no_result_final_df['Person - Phone'] = no_result_final_df['ANI']
-    no_result_final_df['Person - Phone 1'] = no_result_final_df['ANI']
+    no_result_final_df['Person - Phone'] = no_result_final_df['phone_number']
+    no_result_final_df['Person - Phone 1'] = no_result_final_df['phone_number']
     no_result_final_df['Person - Phone 1 - Data Source'] = 'Mineral Owner'
     no_result_final_df['Person - Timezone'] = ''
-    no_result_final_df['Deal - Marketing Medium'] = 'Text'
     no_result_final_df['Deal - Owner'] = no_result_final_df['Team'].apply(lambda x: 'Stephanie' if x == 'Reuben' else 'Stephanie')
-
+    no_result_final_df.drop_duplicates(subset=['phone_number'], inplace=True)
+    
     return no_result_final_df
 
 def get_timezone(row, tz_dict: dict):
@@ -204,7 +193,7 @@ def multiple_or_no_result(row):
 
 
 def create_no_result(cm_db_no_result: pd.DataFrame,
-                     bottoms_up_no_result: pd.DataFrame,
+                     input_df: pd.DataFrame,
                      file_count: int) -> None:
     '''
     This is the main driver function of this module.
@@ -240,17 +229,29 @@ def create_no_result(cm_db_no_result: pd.DataFrame,
         'Person - Timezone'
     ]
 
-    if cm_db_no_result.empty and bottoms_up_no_result.empty:
+    if cm_db_no_result.empty:
         return pd.DataFrame(columns=columns)
 
     print(f'Creating {file_count}. NO RESULT.xlsx file.')
 
     # Run functions to create columns
-    no_result_final_df = pd.concat([cm_db_no_result, bottoms_up_no_result])
+    no_result_final_df = pd.concat([cm_db_no_result])
+
+    if 'phone_number' not in no_result_final_df.columns:
+        no_result_final_df['phone_number'] = no_result_final_df['ANI']
 
     no_result_final_df['Deal - Deal creation date'] = no_result_final_df['Date and Time']
+    no_result_final_df['phone_number'] = no_result_final_df.apply(
+        lambda row: int(row['ANI']) if pd.isna(row['phone_number']) else int(row['phone_number']),
+        axis=1
+    )
+    select_cols_df = input_df[['ANI']]
+    # For 'From' column
+    mask_from = select_cols_df['ANI'].astype(str).str.len() == 11
+    select_cols_df.loc[mask_from, 'ANI'] = select_cols_df.loc[mask_from, 'ANI'].astype(str).str[1:].astype('Int64')
+    merged_df = no_result_final_df.merge(select_cols_df, left_on='phone_number', right_on='ANI', how='left')
 
-    added_deal_title_df = add_deal_title(no_result_final_df)
+    added_deal_title_df = add_deal_title(merged_df)
     added_deal_label_df =  add_deal_label(added_deal_title_df)
     added_deal_stage_df = add_deal_stage(added_deal_label_df)
     added_marketing_medium_df = add_marketing_medium(added_deal_stage_df)
