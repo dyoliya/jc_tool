@@ -296,6 +296,12 @@ def export_new_deals(bottoms_up_output: pd.DataFrame,
     new_deal_df = pd.concat([bottoms_up_final, cm_db_final])
     new_deal_df['Note (if any)'] = 'New Deal'
     rc_data_ouput = pd.concat([new_deal_df, rc_df])
+
+    # to ensure no error if there are 0 follow-ups
+    for col in columns:
+        if col not in rc_data_ouput.columns:
+            rc_data_ouput[col] = ""
+            
     rc_final_output = rc_data_ouput[columns]
 
     return rc_final_output
