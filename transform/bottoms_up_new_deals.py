@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 from tabulate import tabulate
+import os
 
 
 '''
@@ -61,6 +62,7 @@ def search_ani_bottoms_up(final_result_not_exist: pd.DataFrame, bottoms_up_df: p
                                                 left_on='ANI',
                                                 right_on='phone_number',
                                                 how='left')
+
     bottoms_up_check_ani.drop_duplicates(subset=['id', 'ANI'], inplace=True) # Only unique From Number to be checked
 
     # Add bottoms_up details per id
@@ -74,6 +76,97 @@ def search_ani_bottoms_up(final_result_not_exist: pd.DataFrame, bottoms_up_df: p
 
 
     return bottoms_up_exist, bottoms_up_not_exist_final
+
+
+def enrich_missing_names_from_contact_group(
+        bottoms_up_exist: pd.DataFrame,
+        bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
+    '''
+    Fill a matched BUDB row whose first and last names are both blank.
+
+    Priority:
+      1. Use first, middle, and last name from another row with the same
+         contact_group_id where both first and last name are populated.
+      2. If no complete parsed name exists in the group, use Owner as the
+         name while preserving the original matched row and its other fields.
+
+    This only updates the working dataframe used by this workflow. It does not
+    overwrite the Bottoms Up database dataframe.
+    '''
+
+    enriched_df = bottoms_up_exist.copy()
+
+    # These columns can be inferred as float when every value is NULL. Convert
+    # them to object so text fallbacks can be assigned safely.
+    for column in ['first_name', 'middle_name', 'last_name']:
+        enriched_df[column] = enriched_df[column].astype('object')
+
+    def clean_text(value):
+        if pd.isna(value):
+            return None
+        value = str(value).strip()
+        return value if value else None
+
+    def first_non_blank(series):
+        for value in series:
+            cleaned_value = clean_text(value)
+            if cleaned_value is not None:
+                return cleaned_value
+        return None
+
+    for index, row in enriched_df.iterrows():
+        current_first_name = clean_text(row.get('first_name'))
+        current_last_name = clean_text(row.get('last_name'))
+
+        # Apply the fallback only when BOTH parsed name fields are blank.
+        if current_first_name is not None or current_last_name is not None:
+            continue
+
+        contact_group_id = row.get('contact_group_id')
+        if pd.notna(contact_group_id) and str(contact_group_id).strip():
+            group_rows = bottoms_up_df[
+                bottoms_up_df['contact_group_id'].eq(contact_group_id)
+            ]
+        else:
+            group_rows = bottoms_up_df.iloc[0:0]
+
+        if not group_rows.empty:
+            complete_name_mask = (
+                group_rows['first_name'].map(clean_text).notna()
+                & group_rows['last_name'].map(clean_text).notna()
+            )
+            complete_name_rows = group_rows[complete_name_mask]
+        else:
+            complete_name_rows = group_rows
+
+        if not complete_name_rows.empty:
+            # Use the first complete parsed name in the existing BUDB order.
+            name_source = complete_name_rows.iloc[0]
+            enriched_df.at[index, 'first_name'] = clean_text(
+                name_source.get('first_name')
+            )
+            enriched_df.at[index, 'middle_name'] = clean_text(
+                name_source.get('middle_name')
+            )
+            enriched_df.at[index, 'last_name'] = clean_text(
+                name_source.get('last_name')
+            )
+            continue
+
+        # No complete parsed name exists in the contact group. Prefer Owner
+        # from the matched row, then try another nonblank Owner in the group.
+        owner_name = clean_text(row.get('owner'))
+        if owner_name is None and not group_rows.empty:
+            owner_name = first_non_blank(group_rows['owner'])
+
+        if owner_name is not None:
+            enriched_df.at[index, 'first_name'] = owner_name
+            enriched_df.at[index, 'middle_name'] = None
+            enriched_df.at[index, 'last_name'] = None
+
+    return enriched_df
+
+
 
 def add_email_columns(bottoms_up_exist: pd.DataFrame) -> pd.DataFrame:
     '''
@@ -176,40 +269,103 @@ def add_serial_group_fields(bottoms_up_exist: pd.DataFrame, bottoms_up_df: pd.Da
         phone = r['phone_number']
         serials = r['serials']  # ordered unique-ish list from bottoms_up_exist order
 
-        # --- Part A: collect ids per serial preserving serial order and avoid duplicates
+        # --- Part A: collect IDs for all serials associated with the phone
+        # Preserve serial order and avoid duplicate BUDB IDs.
         ids_seen = []
-        per_serial_ids = []  # for debug
-        for s in serials:
-            # match using trimmed string to be robust to whitespace
-            matches_for_serial = bottoms_up_df[bottoms_up_df['serial_number'].astype(str).str.strip() == str(s).strip()]
-            ids_for_s = matches_for_serial['id'].dropna().astype(str).tolist()
-            # keep order, avoid duplicates across serials
-            new_ids = []
-            for _id in ids_for_s:
-                if _id not in ids_seen:
-                    ids_seen.append(_id)
-                    new_ids.append(_id)
-            per_serial_ids.append((s, ids_for_s))
-        serial_group_ids = " | ".join(ids_seen) if ids_seen else ""
 
-        # --- Part B: first serial only for contact_group_id and offers
+        for serial in serials:
+            matches_for_serial = bottoms_up_df[
+                bottoms_up_df['serial_number']
+                .astype(str)
+                .str.strip()
+                .eq(str(serial).strip())
+            ]
+
+            ids_for_serial = (
+                matches_for_serial['id']
+                .dropna()
+                .astype(str)
+                .tolist()
+            )
+
+            for budb_id in ids_for_serial:
+                if budb_id not in ids_seen:
+                    ids_seen.append(budb_id)
+
+        # --- Part B: first serial only for Contact Group ID and offers
         if serials:
             first_serial = serials[0]
-            matches_first = bottoms_up_df[bottoms_up_df['serial_number'].astype(str).str.strip() == str(first_serial).strip()]
 
-            # contact_group_id: take FIRST non-null unique value (as string)
-            cg_vals = matches_first['contact_group_id'].dropna().unique().tolist()
-            serial_group_contact_group_ids = (
-                str(int(cg_vals[0])) if cg_vals and isinstance(cg_vals[0], (float, int)) else str(cg_vals[0]) if cg_vals else ""
+            matches_first = bottoms_up_df[
+                bottoms_up_df['serial_number']
+                .astype(str)
+                .str.strip()
+                .eq(str(first_serial).strip())
+            ]
+
+            # Retain the existing Contact Group ID rule:
+            # take the first nonblank unique contact_group_id.
+            cg_vals = (
+                matches_first['contact_group_id']
+                .dropna()
+                .unique()
+                .tolist()
             )
-            # offers (first serial only): same logic as before
+
+            selected_contact_group_id = cg_vals[0] if cg_vals else None
+
+            serial_group_contact_group_ids = (
+                str(int(selected_contact_group_id))
+                if isinstance(selected_contact_group_id, (float, int))
+                else str(selected_contact_group_id)
+                if selected_contact_group_id is not None
+                else ""
+            )
+
+            # Expand Deal - BU Database ID:
+            # append every BUDB ID belonging to the selected Contact Group ID.
+            if selected_contact_group_id is not None:
+                contact_group_rows = bottoms_up_df[
+                    bottoms_up_df['contact_group_id'].eq(
+                        selected_contact_group_id
+                    )
+                ]
+
+                contact_group_ids = (
+                    contact_group_rows['id']
+                    .dropna()
+                    .astype(str)
+                    .tolist()
+                )
+
+                for budb_id in contact_group_ids:
+                    if budb_id not in ids_seen:
+                        ids_seen.append(budb_id)
+
+            # offers: retain the existing first-serial-only logic
             if matches_first['contact_group_id'].dropna().empty:
-                serial_group_sum_of_all_offers = matches_first['sum_of_all_offers'].sum()
+                serial_group_sum_of_all_offers = (
+                    matches_first['sum_of_all_offers'].sum()
+                )
             else:
-                serial_group_sum_of_all_offers = matches_first.drop_duplicates('contact_group_id')['sum_of_all_offers'].sum()
+                serial_group_sum_of_all_offers = (
+                    matches_first
+                    .drop_duplicates('contact_group_id')
+                    ['sum_of_all_offers']
+                    .sum()
+                )
+
         else:
             serial_group_contact_group_ids = ""
             serial_group_sum_of_all_offers = 0.0
+
+        # Final unique list:
+        # serial-based IDs first, then additional Contact Group IDs.
+        serial_group_ids = (
+            " | ".join(ids_seen)
+            if ids_seen
+            else ""
+        )
 
         rows.append({
             'phone_number': phone,
@@ -217,78 +373,270 @@ def add_serial_group_fields(bottoms_up_exist: pd.DataFrame, bottoms_up_df: pd.Da
             'serial_group_contact_group_ids': serial_group_contact_group_ids,
             'serial_group_sum_of_all_offers': serial_group_sum_of_all_offers
         })
-
     serial_group_df = pd.DataFrame(rows)
 
     return serial_group_df
 
+def add_deal_category_from_budb_ids(
+        bottoms_up_final_df: pd.DataFrame,
+        bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add Deal - Category based on the Bottoms Up records whose IDs
+    appear in Deal - BU Database ID.
+
+    If multiple IDs have different nonblank categories, combine the
+    unique categories using " | " while preserving BU Database ID order.
+    """
+
+    result_df = bottoms_up_final_df.copy()
+
+    def clean_text(value):
+        if pd.isna(value):
+            return ''
+
+        value = str(value).strip()
+
+        if value.lower() in {'nan', 'none', 'nat'}:
+            return ''
+
+        return value
+
+    # Prepare a normalized ID column once instead of repeatedly converting
+    # the entire Bottoms Up dataframe for every output row.
+    budb_lookup_df = bottoms_up_df[['id', 'bu_category']].copy()
+
+    budb_lookup_df['_normalized_id'] = (
+        budb_lookup_df['id']
+        .astype(str)
+        .str.strip()
+        .str.replace(r'\.0$', '', regex=True)
+    )
+
+    def get_categories(output_row):
+        combined_ids = clean_text(
+            output_row.get('Deal - BU Database ID')
+        )
+
+        if not combined_ids:
+            return pd.NA
+
+        id_values = [
+            value.strip()
+            for value in combined_ids.split('|')
+            if value.strip()
+        ]
+
+        # Normalize values such as "123.0" to "123".
+        normalized_ids = [
+            value[:-2] if value.endswith('.0') else value
+            for value in id_values
+        ]
+
+        categories = []
+
+        # Follow the same order in which the IDs appear in
+        # Deal - BU Database ID.
+        for normalized_id in normalized_ids:
+            matched_rows = budb_lookup_df[
+                budb_lookup_df['_normalized_id'].eq(normalized_id)
+            ]
+
+            if matched_rows.empty:
+                continue
+
+            for category_value in matched_rows['bu_category']:
+                category = clean_text(category_value)
+
+                if category and category not in categories:
+                    categories.append(category)
+
+        return ' | '.join(categories) if categories else pd.NA
+
+    result_df['Deal - Category'] = result_df.apply(
+        get_categories,
+        axis=1
+    )
+
+    return result_df
+
 def add_deal_title(bottoms_up_exist: pd.DataFrame, bottoms_up_final_df: pd.DataFrame) -> pd.DataFrame:
-    '''
-    Adds `Deal - Title` column to final dataframe.\n
+    """
+    Add Deal - Title using the person's name and Bottoms Up counties.
 
-    Parameters:
-        `bottoms_up_exist (pd.DataFrame)` - This contains ANI Values that is existing in Bottoms Up Database.\n
-        `bottoms_up_final_df (pd.DataFrame)` - Final output dataframe that contains columns based on spefications.\n
+    Rules:
+        1. Use first and last name when both are available.
+        2. Use first name only when last name is unavailable.
+        3. Group counties by state.
+        4. Use "and" before the final county within each state.
+        5. Use "and" before the final state group.
+        6. Use an Oxford comma for three or more counties or states.
+    """
 
-    Return:
-        `bottoms_up_final_df (pd.DataFrame)` - Dataframe with added `Deal - Title` column.\n
-    '''
+    source_df = bottoms_up_exist.copy()
+    result_df = bottoms_up_final_df.copy()
 
-    # Combine first and last name column
-    # bottoms_up_exist['first_last'] = bottoms_up_exist['first_name'].str.title() + ' ' + bottoms_up_exist['last_name'].str.title()
-    bottoms_up_exist['first_last'] = bottoms_up_exist.apply(lambda row: 
-        row['first_name'].title() if pd.notna(row['first_name']) and pd.isna(row['last_name']) else 
-        (row['first_name'].title() + ' ' + row['last_name'].title()) if pd.notna(row['first_name']) and pd.notna(row['last_name']) else 
-        '', axis=1)
-    
-    grouped = bottoms_up_exist.groupby(['phone_number', 'target_state'])['target_county'].apply(list).reset_index()
+    def clean_text(value):
+        if pd.isna(value):
+            return ''
 
-    # Function to format the county names
+        value = str(value).strip()
+
+        if value.lower() in {'', 'nan', 'none', 'nat'}:
+            return ''
+
+        return value
+
+    def build_name(row):
+        first_name = clean_text(row.get('first_name'))
+        last_name = clean_text(row.get('last_name'))
+
+        if first_name and last_name:
+            return f"{first_name.title()} {last_name.title()}"
+
+        if first_name:
+            return first_name.title()
+
+        if last_name:
+            return last_name.title()
+
+        return ''
+
     def format_counties(counties):
-        unique_counties = list(set(counties))
-        n = len(unique_counties)
-        if n == 1:
-            return unique_counties[0].title() + " County"
-        elif n == 2:
-            return unique_counties[0].title() + " and " + unique_counties[1].title() + " County"
-        elif n > 2:
-            return ', '.join([county.title() for county in unique_counties[:-1]]) + " and " + unique_counties[-1].title() + " County"
+        unique_counties = []
 
-    # Apply the formatting function to the grouped data
-    grouped['formatted'] = grouped['target_county'].apply(format_counties)
+        for county in counties:
+            county = clean_text(county)
 
-    aggregated = grouped.groupby('phone_number').apply(
-        lambda x: ' and '.join([f"{row['formatted']}, {row['target_state'].upper()}" for _, row in x.iterrows()])
-    ).reset_index(name='formatted_result')
-    final_result = bottoms_up_exist[['phone_number', 'first_last']].drop_duplicates().merge(aggregated, on='phone_number', how='left')
-    final_result['Deal - Title'] = final_result.apply(lambda row: f"{row['first_last']} {row['formatted_result']}", axis=1)
+            if not county:
+                continue
 
-    # Create pandas function to add Deal - Deal Title
-    def check_name_address(row):
-        if row['first_last'].nunique() == 0:
-            return None
-        elif row['first_last'].nunique() == 1:
-            counties = row['target_county'].unique()
-            state = row['target_state'].iloc[0]
-            if len(counties) == 1:
-                return f"{row['first_last'].iloc[0]} {counties[0].title()} County, {state}"
-            elif len(counties) == 2:
-                return f"{row['first_last'].iloc[0]} {counties[0].title()} and {counties[1].title()} County, {state}"
+            county = county.title()
+
+            if county not in unique_counties:
+                unique_counties.append(county)
+
+        county_count = len(unique_counties)
+
+        if county_count == 0:
+            return ''
+
+        if county_count == 1:
+            return f"{unique_counties[0]} County"
+
+        if county_count == 2:
+            return (
+                f"{unique_counties[0]} and "
+                f"{unique_counties[1]} County"
+            )
+
+        return (
+            ', '.join(unique_counties[:-1])
+            + f", and {unique_counties[-1]} County"
+        )
+
+    def format_state_groups(state_groups):
+        group_count = len(state_groups)
+
+        if group_count == 0:
+            return ''
+
+        if group_count == 1:
+            return state_groups[0]
+
+        if group_count == 2:
+            return (
+                f"{state_groups[0]} and "
+                f"{state_groups[1]}"
+            )
+
+        return (
+            ', '.join(state_groups[:-1])
+            + f", and {state_groups[-1]}"
+        )
+
+    def build_title(group):
+        # Preserve names in their original database order.
+        unique_names = []
+
+        for _, row in group.iterrows():
+            person_name = build_name(row)
+
+            if person_name and person_name not in unique_names:
+                unique_names.append(person_name)
+
+        if len(unique_names) > 1:
+            return f"Multiple entries {group['phone_number'].iloc[0]}"
+
+        person_name = unique_names[0] if unique_names else ''
+
+        counties_by_state = {}
+
+        for _, row in group.iterrows():
+            county = clean_text(row.get('target_county'))
+            state = clean_text(row.get('target_state')).upper()
+
+            if not county:
+                continue
+
+            if state not in counties_by_state:
+                counties_by_state[state] = []
+
+            county = county.title()
+
+            if county not in counties_by_state[state]:
+                counties_by_state[state].append(county)
+
+        formatted_state_groups = []
+
+        for state, counties in counties_by_state.items():
+            formatted_counties = format_counties(counties)
+
+            if not formatted_counties:
+                continue
+
+            if state:
+                formatted_state_groups.append(
+                    f"{formatted_counties}, {state}"
+                )
             else:
-                # counties_list = ', '.join(counties[:-1])
-                counties_list = ', '.join([county.title() for county in counties[:-1]])
-                return f"{row['first_last'].iloc[0]} {counties_list}, and {counties[-1].title()} County, {state}"
-        else:
-            return f"Multiple entries {row['phone_number'].iloc[0]}"
+                formatted_state_groups.append(
+                    formatted_counties
+                )
 
-    # Add Deal - Title column to final dataframe
-    # deal_title_column = bottoms_up_exist.groupby('phone_number').apply(check_name_address).reset_index()
-    bottoms_up_final_df = bottoms_up_final_df.merge(final_result[['phone_number', 'Deal - Title']], on='phone_number', how='left')
-    # bottoms_up_final_df.rename(columns={0: 'Deal - Title'}, inplace=True)
-    # deal_title_column = None
+        formatted_counties_and_states = format_state_groups(
+            formatted_state_groups
+        )
 
+        return ' '.join(
+            part
+            for part in [
+                person_name,
+                formatted_counties_and_states
+            ]
+            if part
+        )
 
-    return bottoms_up_final_df
+    title_rows = []
+
+    for phone_number, group in source_df.groupby(
+            'phone_number',
+            dropna=False,
+            sort=False):
+
+        title_rows.append({
+            'phone_number': phone_number,
+            'Deal - Title': build_title(group)
+        })
+
+    title_df = pd.DataFrame(title_rows)
+
+    result_df = result_df.merge(
+        title_df,
+        on='phone_number',
+        how='left'
+    )
+
+    return result_df
 
 
 def add_deal_stage(bottoms_up_exist: pd.DataFrame, bottoms_up_final_df: pd.DataFrame) -> pd.DataFrame:
@@ -367,7 +715,7 @@ def add_mailing_address(bottoms_up_exist: pd.DataFrame, bottoms_up_final_df: pd.
     '''
 
     # Define pandas function to add Deal - Mailing Address
-    def add_mailing_address(row):
+    def build_mailing_address(row):
         # Filter out blank addresses
         non_blank_row = row[row['address'] != '']
         def clean(val):
@@ -384,6 +732,12 @@ def add_mailing_address(bottoms_up_exist: pd.DataFrame, bottoms_up_final_df: pd.
             state = clean(non_blank_row['state'].iloc[0])
             postal_code = clean(non_blank_row['postal_code'].iloc[0])
 
+            if not address:
+                address = clean(non_blank_row['address2'].iloc[0])
+                city = clean(non_blank_row['city2'].iloc[0])
+                state = clean(non_blank_row['state2'].iloc[0])
+                postal_code = clean(non_blank_row['postal_code2'].iloc[0])
+
             parts = [address, city, state, postal_code, "USA"]
             parts = [p for p in parts if p]  # remove empty values
 
@@ -393,9 +747,17 @@ def add_mailing_address(bottoms_up_exist: pd.DataFrame, bottoms_up_final_df: pd.
             return 'Multiple address entries'
     
     # Add Person - Mailing Address to final dataframe
-    mailing_address_column = bottoms_up_exist.groupby('phone_number').apply(add_mailing_address).reset_index(name='Person - Mailing Address')
+    mailing_address_rows = []
+
+    for phone_number, group_df in bottoms_up_exist.groupby('phone_number'):
+        mailing_address_rows.append({
+            'phone_number': phone_number,
+            'Person - Mailing Address': build_mailing_address(group_df)
+        })
+
+    mailing_address_column = pd.DataFrame(mailing_address_rows)
     bottoms_up_final_df = bottoms_up_final_df.merge(mailing_address_column, on='phone_number', how='left')
-    bottoms_up_final_df.rename(columns={0: 'Person - Mailing Address'}, inplace=True)
+    # bottoms_up_final_df.rename(columns={0: 'Person - Mailing Address'}, inplace=True)
     mailing_address_column = None
 
     
@@ -525,6 +887,476 @@ def filter_multiple_entries(bottoms_up_final_df, bottoms_up_not_exist):
     print("end filter_multiple_entries\n")
     return single_entries_df, bottoms_up_not_exist_final
 
+def add_offer_generated_date(bottoms_up_exist: pd.DataFrame,
+                             bottoms_up_final_df: pd.DataFrame,
+                             bottoms_up_df: pd.DataFrame,
+                             file_count: int) -> pd.DataFrame:
+    """
+    Add Deal - Offer Generated Date using only the Bottoms Up counties
+    connected to Deal - BU Database ID.
+
+    Matching:
+        Bottoms Up target_county + target_state
+        Google Sheet County + State
+
+    If multiple Bottoms Up counties have valid dates, use the oldest
+    Offer Generated Date.
+
+    Rows without a BUDB ID remain blank and are included in the
+    diagnostic review file.
+    """
+
+    output_column = 'Deal - Offer Generated Date'
+
+    sheet_url = (
+        'https://docs.google.com/spreadsheets/d/'
+        '13nigHtk4KCveWiANDYjNar2gFd-8q08HaGAFMkEzHzY/'
+        'export?format=csv&gid=476072450'
+    )
+
+    required_sheet_columns = [
+        'County',
+        'State',
+        'Offer Generated Date'
+    ]
+
+    diagnostics = []
+
+    def clean_text(value):
+        """Return a cleaned string or an empty string."""
+        if pd.isna(value):
+            return ''
+
+        value = str(value).strip()
+
+        if value.lower() in {'nan', 'none', 'nat'}:
+            return ''
+
+        return value
+
+    def normalize_county(value):
+        """
+        Normalize county names for matching.
+
+        Examples:
+            'Tarrant County' -> 'TARRANT'
+            ' tarrant '      -> 'TARRANT'
+        """
+        value = clean_text(value).upper()
+
+        if value.endswith(' COUNTY'):
+            value = value[:-7].strip()
+
+        return ' '.join(value.split())
+
+    def normalize_state(value):
+        """Normalize state values for matching."""
+        return ' '.join(clean_text(value).upper().split())
+
+    def format_date(value):
+        """
+        Convert a Google Sheet date to yyyy-mm-dd.
+
+        Returns:
+            formatted_date, error_reason
+        """
+        cleaned_value = clean_text(value)
+
+        if not cleaned_value:
+            return pd.NA, 'Selected Google Sheet date is empty'
+
+        parsed_date = pd.to_datetime(
+            cleaned_value,
+            format='%m/%d/%Y',
+            errors='coerce'
+        )
+
+        # This fallback also supports Google Sheets values returned as
+        # timestamps or other recognizable date values.
+        if pd.isna(parsed_date):
+            parsed_date = pd.to_datetime(
+                cleaned_value,
+                errors='coerce'
+            )
+
+        if pd.isna(parsed_date):
+            return (
+                pd.NA,
+                f'Invalid date format in Google Sheet: {cleaned_value}'
+            )
+
+        return parsed_date.strftime('%Y-%m-%d'), ''
+
+    def add_all_rows_as_issue(reason):
+        """
+        Use when the sheet itself cannot be read or validated.
+        Every Bottoms Up output row remains blank but receives a diagnostic.
+        """
+        result_df = bottoms_up_final_df.copy()
+        result_df[output_column] = pd.NA
+
+        for _, output_row in result_df.iterrows():
+            diagnostics.append({
+                'Person - Phone': output_row.get('Person - Phone'),
+                'Deal - County': output_row.get('Deal - County'),
+                output_column: '',
+                'Reason Offer Generated Date Is Blank': reason
+            })
+
+        return result_df
+
+    # Always create the output column first so later output selection
+    # cannot fail even when the Google Sheet is unavailable.
+    result_df = bottoms_up_final_df.copy()
+    result_df[output_column] = pd.NA
+
+    try:
+        # Row 2 is the header, so use header=1.
+        counties_sheet_df = pd.read_csv(
+            sheet_url,
+            header=1,
+            dtype=object
+        )
+
+    except Exception as error:
+        result_df = add_all_rows_as_issue(
+            f'Unable to read Counties Google Sheet: {error}'
+        )
+
+        diagnostic_df = pd.DataFrame(diagnostics)
+        diagnostic_folder = 'output/offer_generated_date_review'
+        os.makedirs(diagnostic_folder, exist_ok=True)
+
+        diagnostic_df.to_csv(
+            os.path.join(
+                diagnostic_folder,
+                f'{file_count}. OFFER GENERATED DATE REVIEW.csv'
+            ),
+            index=False
+        )
+
+        print(
+            '\n[OFFER GENERATED DATE WARNING] '
+            'The Counties Google Sheet could not be read. '
+            'Offer generated dates were left blank.'
+        )
+
+        return result_df
+
+    # Strip accidental spaces from the Google Sheet headers.
+    counties_sheet_df.columns = [
+        clean_text(column)
+        for column in counties_sheet_df.columns
+    ]
+
+    missing_sheet_columns = [
+        column
+        for column in required_sheet_columns
+        if column not in counties_sheet_df.columns
+    ]
+
+    if missing_sheet_columns:
+        result_df = add_all_rows_as_issue(
+            'Missing required Google Sheet column(s): '
+            + ', '.join(missing_sheet_columns)
+        )
+
+        diagnostic_df = pd.DataFrame(diagnostics)
+        diagnostic_folder = 'output/offer_generated_date_review'
+        os.makedirs(diagnostic_folder, exist_ok=True)
+
+        diagnostic_df.to_csv(
+            os.path.join(
+                diagnostic_folder,
+                f'{file_count}. OFFER GENERATED DATE REVIEW.csv'
+            ),
+            index=False
+        )
+
+        print(
+            '\n[OFFER GENERATED DATE WARNING] '
+            'Required Google Sheet columns are missing: '
+            + ', '.join(missing_sheet_columns)
+        )
+
+        return result_df
+
+    # Prepare normalized match fields from the Google Sheet.
+    counties_sheet_df['_normalized_county'] = (
+        counties_sheet_df['County'].map(normalize_county)
+    )
+    counties_sheet_df['_normalized_state'] = (
+        counties_sheet_df['State'].map(normalize_state)
+    )
+
+    # Remove rows that have neither a usable county nor a usable state.
+    counties_sheet_df = counties_sheet_df[
+        counties_sheet_df['_normalized_county'].ne('')
+        | counties_sheet_df['_normalized_state'].ne('')
+    ].copy()
+
+    # Build county/state records from the exact BUDB IDs written into
+    # Deal - BU Database ID.
+    phone_county_rows = []
+
+    for _, output_row in bottoms_up_final_df.iterrows():
+        phone_number = output_row.get('phone_number')
+        combined_ids = clean_text(output_row.get('Deal - BU Database ID'))
+
+        if not combined_ids:
+            phone_county_rows.append({
+                'phone_number': phone_number,
+                'target_county': '',
+                'target_state': '',
+                '_id_issue': 'Deal - BU Database ID is empty'
+            })
+            continue
+
+        # Deal - BU Database ID uses | as the separator.
+        id_values = [
+            value.strip()
+            for value in combined_ids.split('|')
+            if value.strip()
+        ]
+
+        # Convert both sides to strings so IDs such as 123 and 123.0
+        # can still be compared safely.
+        normalized_ids = {
+            value[:-2] if value.endswith('.0') else value
+            for value in id_values
+        }
+
+        matched_id_rows = bottoms_up_df[
+            bottoms_up_df['id']
+            .astype(str)
+            .str.strip()
+            .str.replace(r'\.0$', '', regex=True)
+            .isin(normalized_ids)
+        ]
+
+        if matched_id_rows.empty:
+            phone_county_rows.append({
+                'phone_number': phone_number,
+                'target_county': '',
+                'target_state': '',
+                '_id_issue': (
+                    'No Bottoms Up records were found for '
+                    f'Deal - BU Database ID: {combined_ids}'
+                )
+            })
+            continue
+
+        for _, id_row in matched_id_rows.iterrows():
+            phone_county_rows.append({
+                'phone_number': phone_number,
+                'target_county': id_row.get('target_county'),
+                'target_state': id_row.get('target_state'),
+                '_id_issue': ''
+            })
+
+    phone_counties_df = (
+        pd.DataFrame(phone_county_rows)
+        .drop_duplicates(
+            subset=['phone_number', 'target_county', 'target_state']
+        )
+    )
+
+    phone_counties_df['_normalized_county'] = (
+        phone_counties_df['target_county'].map(normalize_county)
+    )
+
+    phone_counties_df['_normalized_state'] = (
+        phone_counties_df['target_state'].map(normalize_state)
+    )
+
+    date_rows = []
+
+    for phone_number, phone_group in phone_counties_df.groupby(
+            'phone_number',
+            dropna=False):
+
+        selected_dates = []
+        phone_reasons = []
+
+        for _, county_row in phone_group.iterrows():
+            id_issue = clean_text(county_row.get('_id_issue'))
+
+            if id_issue:
+                phone_reasons.append(id_issue)
+                continue
+            original_county = clean_text(county_row.get('target_county'))
+            original_state = clean_text(county_row.get('target_state'))
+
+            normalized_county = county_row['_normalized_county']
+            normalized_state = county_row['_normalized_state']
+
+            if not normalized_county and not normalized_state:
+                phone_reasons.append(
+                    'Bottoms Up county and state are both empty'
+                )
+                continue
+
+            if not normalized_county:
+                phone_reasons.append(
+                    f'Bottoms Up county is empty; state: {original_state}'
+                )
+                continue
+
+            if not normalized_state:
+                phone_reasons.append(
+                    f'Bottoms Up state is empty; county: {original_county}'
+                )
+                continue
+
+            sheet_matches = counties_sheet_df[
+                counties_sheet_df['_normalized_county'].eq(
+                    normalized_county
+                )
+                & counties_sheet_df['_normalized_state'].eq(
+                    normalized_state
+                )
+            ]
+
+            if sheet_matches.empty:
+                phone_reasons.append(
+                    f'County/state not found in Counties tab: '
+                    f'{original_county} County, {original_state}'
+                )
+                continue
+
+            # Use the first matching sheet row. Duplicate matching rows
+            # are reported so the user knows that the sheet needs review.
+            sheet_row = sheet_matches.iloc[0]
+
+            if len(sheet_matches) > 1:
+                print(
+                    '[OFFER GENERATED DATE WARNING] '
+                    f'Multiple Counties-tab rows matched '
+                    f'{original_county} County, {original_state}. '
+                    'The first matching row was used.'
+                )
+
+            selected_raw_date = clean_text(
+                sheet_row.get('Offer Generated Date')
+            )
+            selected_source = 'Offer Generated Date'
+
+            formatted_date, date_error = format_date(selected_raw_date)
+
+            if date_error:
+                phone_reasons.append(
+                    f'{original_county} County, {original_state} — '
+                    f'{selected_source}: {date_error}'
+                )
+                continue
+
+            selected_dates.append({
+                'date': formatted_date,
+                'parsed_date': pd.to_datetime(
+                    formatted_date,
+                    errors='coerce'
+                ),
+                'county': original_county,
+                'state': original_state,
+                'source': selected_source
+            })
+
+        if selected_dates:
+            # A phone can be tied to more than one BUDB county.
+            # Compare all valid county dates and use the oldest one.
+            selected_dates.sort(
+                key=lambda item: item['parsed_date']
+            )
+
+            chosen_date = selected_dates[0]['date']
+            blank_reason = ''
+
+        else:
+            chosen_date = pd.NA
+            blank_reason = ' | '.join(dict.fromkeys(phone_reasons))
+
+            if not blank_reason:
+                blank_reason = (
+                    'No usable county/state/date combination was found'
+                )
+
+        date_rows.append({
+            'phone_number': phone_number,
+            output_column: chosen_date,
+            '_offer_generated_date_reason': blank_reason
+        })
+
+    phone_date_df = pd.DataFrame(date_rows)
+
+    # Replace the initially blank date column with the matched result.
+    result_df.drop(columns=[output_column], inplace=True)
+
+    result_df = result_df.merge(
+        phone_date_df,
+        on='phone_number',
+        how='left'
+    )
+
+    result_df[output_column] = result_df[output_column].astype('string')
+
+    blank_date_mask = (
+        result_df[output_column].isna()
+        | result_df[output_column].str.strip().eq('')
+    )
+
+    for _, output_row in result_df[blank_date_mask].iterrows():
+        diagnostics.append({
+            'Person - Phone': output_row.get(
+                'Person - Phone',
+                output_row.get('phone_number')
+            ),
+            'Deal - County': output_row.get('Deal - County'),
+            output_column: '',
+            'Reason Offer Generated Date Is Blank': (
+                output_row.get('_offer_generated_date_reason')
+                or 'No matching date result was produced'
+            )
+        })
+
+    # The reason column is only for the diagnostic file, not the
+    # Pipedrive import output.
+    result_df.drop(
+        columns=['_offer_generated_date_reason'],
+        inplace=True,
+        errors='ignore'
+    )
+
+    diagnostic_folder = 'output/offer_generated_date_review'
+    os.makedirs(diagnostic_folder, exist_ok=True)
+
+    diagnostic_file = os.path.join(
+        diagnostic_folder,
+        f'{file_count}. OFFER GENERATED DATE REVIEW.csv'
+    )
+
+    if diagnostics:
+        diagnostic_df = pd.DataFrame(diagnostics)
+        diagnostic_df.to_csv(diagnostic_file, index=False)
+
+        print(
+            '\n[OFFER GENERATED DATE REVIEW]'
+            f'\n{len(diagnostic_df):,} Bottoms Up output row(s) '
+            'have no Offer Generated Date.'
+            f'\nReview: {diagnostic_file}'
+        )
+    else:
+        # Delete an old diagnostic for the same file_count so it cannot
+        # be mistaken for the current run.
+        if os.path.exists(diagnostic_file):
+            os.remove(diagnostic_file)
+
+        print(
+            '\n[OFFER GENERATED DATE]'
+            '\nAll Bottoms Up output rows received an '
+            'Offer Generated Date.'
+        )
+
+    return result_df
 
 
 def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.DataFrame, file_count: int) -> 'tuple[pd.DataFrame, pd.DataFrame | None]':
@@ -544,7 +1376,9 @@ def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.D
     '''
     columns = [
         'Deal - Deal creation date',
+        'Deal - Offer Generated Date',
         'Deal - Title',
+        'Deal - Category',
         'Deal - Label',
         'Deal - Stage',
         'Deal - Owner',
@@ -603,7 +1437,14 @@ def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.D
         return bottoms_up_not_exist, pd.DataFrame(), pd.DataFrame() # Return empty dataframe if bottoms_up_exist is empty
 
     else:
-        
+        # Resolve missing parsed names before Deal - Title and Person - Name
+        # are created. The matched row stays the same; only its working name
+        # fields can be filled from its contact group or Owner.
+        bottoms_up_exist = enrich_missing_names_from_contact_group(
+            bottoms_up_exist,
+            bottoms_up_df
+        )
+
         # Run all functions that creates columns
         bottoms_up_final_df = add_email_columns(bottoms_up_exist)
         added_serial_df = add_serial_number(bottoms_up_exist, bottoms_up_final_df)
@@ -627,7 +1468,9 @@ def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.D
         added_deal_title_df = add_deal_title(bottoms_up_exist, added_serial_df)
         added_deal_stage_df = add_deal_stage(bottoms_up_exist, added_deal_title_df)
         added_deal_county_df = add_deal_county(bottoms_up_exist, added_deal_stage_df)
-        added_mailing_address_df = add_mailing_address(bottoms_up_exist, added_deal_county_df)
+        added_offer_date_df = add_offer_generated_date(bottoms_up_exist, added_deal_county_df, bottoms_up_df, file_count)
+        added_deal_category_df = add_deal_category_from_budb_ids(added_offer_date_df, bottoms_up_df)
+        added_mailing_address_df = add_mailing_address(bottoms_up_exist, added_deal_category_df)
         added_note_content_df = add_note_content(bottoms_up_exist, added_mailing_address_df)
         added_person_name_df = add_person_name(bottoms_up_exist, added_note_content_df)
         added_constants_df = add_constant_columns(added_person_name_df)

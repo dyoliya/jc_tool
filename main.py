@@ -71,7 +71,7 @@ def read_bottoms_up(bottoms_up_db: str) -> pd.DataFrame:
         # Connect to SQLite Database
         connection = sqlite3.connect(bottoms_up_db)
 
-        print(f'Reading Bottoms Up Database.')
+        print(f"Reading Bottoms Up Database: {os.path.basename(bottoms_up_db)}")
 
         # Execute query and fetch the data into a Pandas Dataframe
         df = pd.read_sql_query('SELECT * FROM bottoms_up', connection)
@@ -90,7 +90,7 @@ def read_bottoms_up(bottoms_up_db: str) -> pd.DataFrame:
             'Contact Type': 'contact_type',
             'ATTN': 'attn',
             '# of Interests': 'no_of_interest',
-            'Category': 'category',
+            'Category': 'bu_category',
             'PDP Value ($)': 'offer_amount',
             'Total Value - Low ($)': 'value_low',
             'Total Value - High ($)': 'value_high',
@@ -116,6 +116,115 @@ def read_bottoms_up(bottoms_up_db: str) -> pd.DataFrame:
     finally:
         connection.close()
 
+def normalize_ntm_contact_group_id(value):
+    """
+    Preserve numeric and alphanumeric NTM contact-group IDs as strings.
+
+    Multiple pipe-separated IDs are retained, with blanks and duplicates
+    removed while preserving their original order.
+    """
+    if pd.isna(value):
+        return pd.NA
+
+    unique_group_ids = []
+
+    for item in str(value).split('|'):
+        item = item.strip()
+
+        if not item or item.lower() in {'nan', 'none', 'nat'}:
+            continue
+
+        # Normalize Excel-style numeric strings such as 116627.0.
+        # Alphanumeric values such as ABC123 remain unchanged.
+        try:
+            numeric_value = float(item)
+
+            if numeric_value.is_integer():
+                normalized_id = str(int(numeric_value))
+            else:
+                normalized_id = item
+        except (ValueError, TypeError):
+            normalized_id = item
+
+        if normalized_id not in unique_group_ids:
+            unique_group_ids.append(normalized_id)
+
+    if not unique_group_ids:
+        return pd.NA
+
+    return ' | '.join(unique_group_ids)
+
+def reshape_ntm_contacts(ntm_contacts_df: pd.DataFrame) -> 'tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]':
+    '''
+    Reshape the flat ntm_contacts table into the DataFrames expected by the
+    existing abandoned-calls workflow.
+    '''
+
+    phone_columns = [f'phone{i}' for i in range(1, 7)]
+    phone_number_df = (
+        ntm_contacts_df[['ntm_id', *phone_columns]]
+        .melt(id_vars='ntm_id', value_vars=phone_columns, value_name='phone_number')
+        .drop(columns='variable')
+        .dropna(subset=['phone_number'])
+    )
+    phone_number_df['phone_number'] = pd.to_numeric(
+        phone_number_df['phone_number'], errors='coerce'
+    ).astype('Int64')
+    phone_number_df.dropna(subset=['phone_number'], inplace=True)
+    phone_number_df.drop_duplicates(subset=['ntm_id', 'phone_number'], inplace=True)
+
+    email_columns = [f'email{i}' for i in range(1, 7)]
+    email_address_df = (
+        ntm_contacts_df[['ntm_id', *email_columns]]
+        .melt(id_vars='ntm_id', value_vars=email_columns, value_name='email_address')
+        .drop(columns='variable')
+        .dropna(subset=['email_address'])
+    )
+    email_address_df['email_address'] = email_address_df['email_address'].astype(str).str.strip()
+    email_address_df = email_address_df[
+        email_address_df['email_address'].ne('')
+    ].drop_duplicates(subset=['ntm_id', 'email_address'])
+
+    serial_numbers_df = ntm_contacts_df[
+        ['ntm_id', 'serial_number', 'old_serial_number']
+    ].copy()
+    current_serial = serial_numbers_df['serial_number'].fillna('').astype(str).str.strip()
+    old_serial = serial_numbers_df['old_serial_number'].fillna('').astype(str).str.strip()
+
+    serial_numbers_df['serial_numbers'] = current_serial
+    only_old_serial = current_serial.eq('') & old_serial.ne('')
+    different_serials = (
+        current_serial.ne('')
+        & old_serial.ne('')
+        & current_serial.ne(old_serial)
+    )
+    serial_numbers_df.loc[only_old_serial, 'serial_numbers'] = old_serial[only_old_serial]
+    serial_numbers_df.loc[different_serials, 'serial_numbers'] = (
+        current_serial[different_serials] + ' | ' + old_serial[different_serials]
+    )
+    serial_numbers_df = serial_numbers_df[['ntm_id', 'serial_numbers']]
+    serial_numbers_df.loc[
+        serial_numbers_df['serial_numbers'].eq(''), 'serial_numbers'
+    ] = pd.NA
+
+    ntm_contacts_df = ntm_contacts_df.copy()
+
+    ntm_contacts_df['ntm_contact_group_id'] = (
+        ntm_contacts_df['ntm_contact_group_id']
+        .apply(normalize_ntm_contact_group_id)
+        .astype('string')
+    )
+
+    cm_db_df = ntm_contacts_df[[
+        'ntm_id', 'first_name', 'middle_name', 'last_name', 'deal_id',
+        'budb_id', 'ntm_contact_group_id',
+        'address', 'city', 'state_address', 'postal_code',
+        'address2', 'city2', 'state_address2', 'postal_code2',
+        'data_source', 'country', 'state'
+    ]].copy()
+
+    return phone_number_df, email_address_df, serial_numbers_df, cm_db_df
+
 
 def read_cm_live_db(host: str,
                     port: str,
@@ -128,31 +237,35 @@ def read_cm_live_db(host: str,
         # Create database engine
         engine = create_engine(f'mysql+pymysql://{user}:{quote(password)}@{host}:{port}/{name}')
 
-        print(f'Reading Community Minerals Database.')
+        print('Reading NTM contacts table.')
 
-        # Execute query and fetch the data into a Pandas Dataframe
-        phone_number_df = pd.read_sql_query(phone_number_query, engine)
-        emaiL_address_df = pd.read_sql_query(email_address_query, engine)
-        serial_numbers_df = pd.read_sql_query(serial_numbers_query_mysql, engine)
-        cm_db_df = pd.read_sql_query(cm_db_query, engine)
+        # Read the flat NTM table once, then reshape its repeated phone/email
+        # columns into the same DataFrames expected by the existing workflow.
+        ntm_contacts_df = pd.read_sql_query(ntm_contacts_query, engine)
 
-        # Change data type of phone number to int
-        phone_number_df['phone_number'] = phone_number_df[phone_number_df['phone_number'] \
-                                                          .str.contains(r'^[0-9]+$', na=False)] \
-                                                            ['phone_number'].astype('Int64')
+        phone_number_df, email_address_df, serial_numbers_df, cm_db_df = (
+            reshape_ntm_contacts(ntm_contacts_df)
+        )
         
-        phone_number_df.to_csv('./data/database/cm_db/phone_number.csv', index=False)
-        emaiL_address_df.to_csv('./data/database/cm_db/email_address.csv', index=False)
-        serial_numbers_df.to_csv('./data/database/cm_db/serial_number.csv', index=False)
-        cm_db_df.to_csv('./data/database/cm_db/cm_db.csv', index=False)
+        phone_number_df.to_csv('./data/database/ntm_db/phone_number.csv', index=False)
+        email_address_df.to_csv('./data/database/ntm_db/email_address.csv', index=False)
+        serial_numbers_df.to_csv('./data/database/ntm_db/serial_number.csv', index=False)
+        cm_db_df.to_csv('./data/database/ntm_db/ntm_db.csv', index=False)
 
-        return phone_number_df, emaiL_address_df, serial_numbers_df, cm_db_df
+        return phone_number_df, email_address_df, serial_numbers_df, cm_db_df
 
     except Exception as e:
-        return None,None,None,None
+        import traceback
+
+        print('\n[ERROR read_ntm_live_db]')
+        print(f'{type(e).__name__}: {e}')
+        traceback.print_exc()
+
+        return None, None, None, None
 
     finally:
-        engine.dispose()
+        if 'engine' in locals():
+            engine.dispose()
 
 def read_json_data():
 
@@ -229,7 +342,9 @@ def export_new_deals(bottoms_up_output: pd.DataFrame,
         'Contact ID',
         'ANI',
         'Team',
+        'Deal - Offer Generated Date',
         'Deal - Title',
+        'Deal - Category',
         'Deal - Label',
         'Deal - Stage',
         'Deal - Owner',
@@ -274,7 +389,9 @@ def export_new_deals(bottoms_up_output: pd.DataFrame,
         'Done',
         'Subject',
         'Type',
-        'Person - Timezone'
+        'Person - Timezone',
+        'Deal - BU Database ID',
+        'Deal - Contact Group ID'
     ]
 
     if cm_db_final.empty and bottoms_up_final.empty:
@@ -455,16 +572,16 @@ def get_cm_deal_id(
                                             right_on='phone_number',
                                             how='left')
     # cm_db_check_ani.drop_duplicates(subset=['ANI'], inplace=True)
-    cm_db_exist = cm_db_check_ani[cm_db_check_ani['id'].notnull()]
-    cm_db_not_exist = cm_db_check_ani[cm_db_check_ani['id'].isna()][['ANI', 'Date and Time', 'Team', 'Date', 'Time', 'Contact ID']]
+    cm_db_exist = cm_db_check_ani[cm_db_check_ani['ntm_id'].notnull()]
+    cm_db_not_exist = cm_db_check_ani[cm_db_check_ani['ntm_id'].isna()][['ANI', 'Date and Time', 'Team', 'Date', 'Time', 'Contact ID']]
     cm_db_not_exist['Deal - Deal Summary'] = 'No Information in Email'
 
     # Filter all contacts that has deal id
-    search_deal_id_df = cm_db_df[cm_db_df['deal_id'].notnull()][['id', 'deal_id']]
+    search_deal_id_df = cm_db_df[cm_db_df['deal_id'].notnull()][['ntm_id', 'deal_id']]
 
     # Add Deal ID Column to existing ANI Numbers
     get_deal_id_df = cm_db_exist.merge(search_deal_id_df,
-                                    on='id',
+                                    on='ntm_id',
                                     how='left')
 
     # Filter ANI Numbers that has Deal ID
@@ -485,7 +602,7 @@ def get_cm_deal_id(
     merge_pd_deal_id_df['all_deal_id'] = merge_pd_deal_id_df.groupby('phone_number')['deal_id'].transform(
         lambda x: " | ".join(x.astype(str).unique()) if x.nunique() > 1 else str(x.iloc[0])
     )
-    merge_pd_deal_id_df.drop(columns=['id', 'deal_id'], axis=1, inplace=True)
+    merge_pd_deal_id_df.drop(columns=['ntm_id', 'deal_id'], axis=1, inplace=True)
     merge_pd_deal_id_df.rename(columns={'Deal - ID': 'Deal ID'}, inplace=True)
 
     # Concat FU and CM Deal ID FU
@@ -515,6 +632,250 @@ def normalize_phone(phone):
         phone = phone[1:]
     return phone.strip()
 
+
+def decode_phone_number_list(value):
+    """Convert Excel-safe CSV phone text into the format used by search_ani."""
+    if pd.isna(value):
+        return ''
+
+    text = str(value).strip()
+    if text.startswith('="') and text.endswith('"'):
+        text = text[2:-1].replace('""', '"')
+
+    phone_values = []
+    for phone in text.split(','):
+        normalized = normalize_phone(phone.strip())
+        if normalized and normalized not in phone_values:
+            phone_values.append(normalized)
+
+    # search_ani splits on commas without trimming, so keep this space-free.
+    return ','.join(phone_values)
+
+
+def add_related_bottoms_up_phones_to_pipedrive(
+        pipedrive_df: pd.DataFrame,
+        bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add BUDB sibling phones to the in-memory Pipedrive search data.
+
+    If any phone from one BUDB row is already associated with a Pipedrive
+    deal, all other nonblank phones from that same BUDB row are treated as
+    related to that deal for this run. The actual pipedrive_data.csv file is
+    not changed.
+    """
+
+    result_df = pipedrive_df.copy()
+    phone_columns = [
+        column
+        for column in [f'phone{i}' for i in range(1, 6)]
+        if column in bottoms_up_df.columns
+    ]
+
+    if (
+        result_df.empty
+        or bottoms_up_df.empty
+        or not phone_columns
+        or 'phone_number' not in result_df.columns
+    ):
+        return result_df
+
+    # Always use the untouched Pipedrive phone list as the anchor. This avoids
+    # allowing a phone inferred from another database to trigger this fallback.
+    actual_phone_column = (
+        'Person - Phone - Work'
+        if 'Person - Phone - Work' in result_df.columns
+        else 'phone_number'
+    )
+
+    # Map every actual Pipedrive phone to the deal row(s) containing it.
+    pipedrive_phone_to_rows = {}
+    for row_index, phone_list in result_df[actual_phone_column].items():
+        for phone in str(phone_list or '').split(','):
+            normalized_phone = normalize_phone(phone)
+            if normalized_phone:
+                pipedrive_phone_to_rows.setdefault(
+                    normalized_phone, set()
+                ).add(row_index)
+
+    if not pipedrive_phone_to_rows:
+        return result_df
+
+    # BUDB phone1-phone5 were converted to Int64 in read_bottoms_up().
+    # Filter first so we only iterate through BUDB rows having at least one
+    # phone that is already present in the Pipedrive export.
+    numeric_pipedrive_phones = {
+        int(phone)
+        for phone in pipedrive_phone_to_rows
+        if phone.isdigit()
+    }
+    if not numeric_pipedrive_phones:
+        return result_df
+
+    matched_bottoms_up_rows = bottoms_up_df.loc[
+        bottoms_up_df[phone_columns]
+        .isin(numeric_pipedrive_phones)
+        .any(axis=1),
+        phone_columns
+    ]
+
+    related_phones_by_deal_row = {}
+    for _, bottoms_up_row in matched_bottoms_up_rows.iterrows():
+        related_phones = []
+        for value in bottoms_up_row:
+            normalized_phone = normalize_phone(value)
+            if normalized_phone and normalized_phone not in related_phones:
+                related_phones.append(normalized_phone)
+
+        matched_deal_rows = set()
+        for phone in related_phones:
+            matched_deal_rows.update(pipedrive_phone_to_rows.get(phone, set()))
+
+        for row_index in matched_deal_rows:
+            related_phones_by_deal_row.setdefault(row_index, set()).update(
+                related_phones
+            )
+
+    added_phone_associations = 0
+    affected_deal_rows = 0
+
+    for row_index, related_phones in related_phones_by_deal_row.items():
+        existing_phones = [
+            normalize_phone(phone)
+            for phone in str(result_df.at[row_index, 'phone_number'] or '').split(',')
+        ]
+        existing_phones = [phone for phone in existing_phones if phone]
+
+        combined_phones = list(existing_phones)
+        for phone in sorted(related_phones):
+            if phone not in combined_phones:
+                combined_phones.append(phone)
+                added_phone_associations += 1
+
+        if len(combined_phones) > len(existing_phones):
+            affected_deal_rows += 1
+            result_df.at[row_index, 'phone_number'] = ','.join(combined_phones)
+
+    print(
+        "Related BUDB phone fallback: "
+        f"added {added_phone_associations} phone association(s) across "
+        f"{affected_deal_rows} Pipedrive deal row(s)."
+    )
+
+    return result_df
+
+
+def add_related_ntm_phones_to_pipedrive(
+        pipedrive_df: pd.DataFrame,
+        phone_number_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add NTM sibling phones to the in-memory Pipedrive search data.
+
+    The long phone_number_df contains phone1-phone6 grouped by the same NTM
+    contact id. If one phone for an id is actually present on a Pipedrive deal,
+    the other phones for that same id are treated as related to that deal for
+    this run. The actual pipedrive_data.csv file is not changed.
+    """
+
+    result_df = pipedrive_df.copy()
+    required_ntm_columns = {'ntm_id', 'phone_number'}
+
+    if (
+        result_df.empty
+        or phone_number_df.empty
+        or not required_ntm_columns.issubset(phone_number_df.columns)
+        or 'phone_number' not in result_df.columns
+    ):
+        return result_df
+
+    # Person - Phone - Work was saved before either database fallback runs,
+    # so it represents only the phones actually exported from Pipedrive.
+    actual_phone_column = (
+        'Person - Phone - Work'
+        if 'Person - Phone - Work' in result_df.columns
+        else 'phone_number'
+    )
+
+    pipedrive_phone_to_rows = {}
+    for row_index, phone_list in result_df[actual_phone_column].items():
+        for phone in str(phone_list or '').split(','):
+            normalized_phone = normalize_phone(phone)
+            if normalized_phone:
+                pipedrive_phone_to_rows.setdefault(
+                    normalized_phone, set()
+                ).add(row_index)
+
+    numeric_pipedrive_phones = {
+        int(phone)
+        for phone in pipedrive_phone_to_rows
+        if phone.isdigit()
+    }
+    if not numeric_pipedrive_phones:
+        return result_df
+
+    ntm_phones = phone_number_df[['ntm_id', 'phone_number']].dropna().copy()
+    matched_ntm_ids = ntm_phones.loc[
+        ntm_phones['phone_number'].isin(numeric_pipedrive_phones),
+        'ntm_id'
+    ].drop_duplicates()
+
+    if matched_ntm_ids.empty:
+        print(
+            "Related NTM phone fallback: added 0 phone association(s) "
+            "across 0 Pipedrive deal row(s)."
+        )
+        return result_df
+
+    matched_ntm_phones = ntm_phones[
+        ntm_phones['ntm_id'].isin(matched_ntm_ids)
+    ]
+
+    related_phones_by_deal_row = {}
+    for _, contact_phones in matched_ntm_phones.groupby('ntm_id', sort=False):
+        related_phones = []
+        for value in contact_phones['phone_number']:
+            normalized_phone = normalize_phone(value)
+            if normalized_phone and normalized_phone not in related_phones:
+                related_phones.append(normalized_phone)
+
+        matched_deal_rows = set()
+        for phone in related_phones:
+            matched_deal_rows.update(pipedrive_phone_to_rows.get(phone, set()))
+
+        for row_index in matched_deal_rows:
+            related_phones_by_deal_row.setdefault(row_index, set()).update(
+                related_phones
+            )
+
+    added_phone_associations = 0
+    affected_deal_rows = 0
+
+    for row_index, related_phones in related_phones_by_deal_row.items():
+        existing_phones = [
+            normalize_phone(phone)
+            for phone in str(result_df.at[row_index, 'phone_number'] or '').split(',')
+        ]
+        existing_phones = [phone for phone in existing_phones if phone]
+
+        combined_phones = list(existing_phones)
+        for phone in sorted(related_phones):
+            if phone not in combined_phones:
+                combined_phones.append(phone)
+                added_phone_associations += 1
+
+        if len(combined_phones) > len(existing_phones):
+            affected_deal_rows += 1
+            result_df.at[row_index, 'phone_number'] = ','.join(combined_phones)
+
+    print(
+        "Related NTM phone fallback: "
+        f"added {added_phone_associations} phone association(s) across "
+        f"{affected_deal_rows} Pipedrive deal row(s)."
+    )
+
+    return result_df
+
+
+
 def main():
     '''
     Main driver function of this tool that will read database files, search if ANI Numbers is existing and export
@@ -533,7 +894,10 @@ def main():
     try:
         # Define path of database file
         bottoms_up_path = 'data/database/bottoms_up'
-        cm_db_path = 'data/database/cm_db'
+        cm_db_path = 'data/database/ntm_db'
+
+        # Ensure the NTM cache folder exists.
+        os.makedirs(cm_db_path, exist_ok=True)
         db_host, db_port, db_user, db_password, db_name = extract_config_info()
 
         # Read all input files
@@ -555,6 +919,7 @@ def main():
                                                                                             db_name) # Live CM Database 
         # If database credentials is wrong
         if phone_number_df is None:
+            print('NTM database reading failed. Check the error above.')
             return 'db_wrong'
         # ----------- end here -----------   
 
@@ -563,7 +928,7 @@ def main():
         # # ----------- start here -----------  
         # print("Skipping live CM DB read. Loading from saved CSVs instead...")
 
-        # cm_db_path = 'data/database/cm_db'
+        # cm_db_path = 'data/database/ntm_db'
 
         # phone_number_df = pd.read_csv(os.path.join(cm_db_path, 'phone_number.csv'), low_memory=False)
         # email_address_df = pd.read_csv(os.path.join(cm_db_path, 'email_address.csv'), low_memory=False)
@@ -574,12 +939,35 @@ def main():
         file_count = 1 # Counter for Abandoned Calls File
         user_designation, condition_dict = read_json_data()
 
+        # comment out for testing:
         update_pipedrive_data()
 
         # Read single pipedrive file
         for pipedrive_file in pipedrive_file_list:
-            pipedrive_df = pd.read_csv(pipedrive_file, low_memory=False)
+            pipedrive_df = pd.read_csv(
+                pipedrive_file,
+                low_memory=False,
+                dtype={'phone_number': 'string'}
+            )
+            pipedrive_df['phone_number'] = pipedrive_df['phone_number'].apply(
+                decode_phone_number_list
+            )
             pipedrive_df['Person - Phone - Work'] = pipedrive_df['phone_number']
+
+            # Keep pipedrive_data.csv unchanged, but allow a BUDB phone to
+            # inherit a Pipedrive match from another phone on the same BUDB row.
+            pipedrive_df = add_related_bottoms_up_phones_to_pipedrive(
+                pipedrive_df,
+                bottoms_up_df
+            )
+
+            # Apply the same related-phone fallback to phone1-phone6 from the
+            # same NTM contact row.
+            pipedrive_df = add_related_ntm_phones_to_pipedrive(
+                pipedrive_df,
+                phone_number_df
+            )
+
 
         # Iterate through list of abandoned_calls files
         for abandoned_calls_file in abandoned_calls_file_list:
@@ -609,19 +997,23 @@ def main():
             log_step("create_follow_up", **{"Follow-up": rc_df})
             
             # Search in Bottoms Up Database
+            print("Creating new deals from BU")            
             bottoms_up_not_exist, bottoms_up_output, bottom_up_final_df = create_new_deals_bottoms_up(ani_not_exist,
                                                                                     bottoms_up_df,
                                                                                     file_count)
-            log_step("New deals found in BUDB", **{"From BUDB": bottoms_up_output})
+            log_step("New deals found in BUDB", **{"PN From BUDB": bottoms_up_output})
 
             # Search in Community Minerals Database
+            print("Creating new deals from NTM")
             cm_db_not_exist, cm_db_output, cm_db_final_df = create_new_deals_cm(
                                                                 bottoms_up_not_exist,
                                                                 phone_number_df,
                                                                 email_address_df,
                                                                 serial_numbers_df,
-                                                                cm_db_df)
-            log_step("New deals found in .work", **{"From .work": cm_db_output})
+                                                                cm_db_df,
+                                                                bottoms_up_df,
+                                                                file_count)
+            log_step("New deals found in NTM", **{"PN From NTM": cm_db_output})
 
             # Concatenate Bottoms Up and CM then create New Deals output file
             rc_added_new_deals_df = export_new_deals(bottoms_up_output,
