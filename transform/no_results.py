@@ -156,7 +156,7 @@ def add_constant_columns(no_result_final_df: pd.DataFrame) -> pd.DataFrame:
     no_result_final_df['Person - Phone 1'] = no_result_final_df['phone_number']
     no_result_final_df['Person - Phone 1 - Data Source'] = 'Mineral Owner'
     no_result_final_df['Person - Timezone'] = ''
-    no_result_final_df['Deal - Owner'] = no_result_final_df['Team'].apply(lambda x: 'Stephanie' if x == 'Reuben' else 'Stephanie')
+    no_result_final_df['Deal - Owner'] = 'Wilferine Co'
     no_result_final_df.drop_duplicates(subset=['phone_number'], inplace=True)
     
     return no_result_final_df

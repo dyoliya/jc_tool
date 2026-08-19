@@ -381,7 +381,7 @@ def add_deal_category_from_budb_ids(
         bottoms_up_final_df: pd.DataFrame,
         bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add Deal - Category based on the Bottoms Up records whose IDs
+    Add Deal - Deal Size Category based on the Bottoms Up records whose IDs
     appear in Deal - BU Database ID.
 
     If multiple IDs have different nonblank categories, combine the
@@ -452,7 +452,7 @@ def add_deal_category_from_budb_ids(
 
         return ' | '.join(categories) if categories else pd.NA
 
-    result_df['Deal - Category'] = result_df.apply(
+    result_df['Deal - Deal Size Category'] = result_df.apply(
         get_categories,
         axis=1
     )
@@ -861,7 +861,7 @@ def add_constant_columns(bottoms_up_final_df: pd.DataFrame) -> pd.DataFrame:
     bottoms_up_final_df['Deal - Deal Status'] = ''
     bottoms_up_final_df['Deal - Deal creation date'] = bottoms_up_final_df['Date and Time']
     bottoms_up_final_df['Person - Timezone'] = ''
-    bottoms_up_final_df['Deal - Owner'] = 'Stephanie'
+    bottoms_up_final_df['Deal - Owner'] = 'Froi'
 
 
     return bottoms_up_final_df
@@ -1378,7 +1378,7 @@ def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.D
         'Deal - Deal creation date',
         'Deal - Offer Generated Date',
         'Deal - Title',
-        'Deal - Category',
+        'Deal - Deal Size Category',
         'Deal - Label',
         'Deal - Stage',
         'Deal - Owner',

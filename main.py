@@ -344,7 +344,7 @@ def export_new_deals(bottoms_up_output: pd.DataFrame,
         'Team',
         'Deal - Offer Generated Date',
         'Deal - Title',
-        'Deal - Category',
+        'Deal - Deal Size Category',
         'Deal - Label',
         'Deal - Stage',
         'Deal - Owner',
@@ -599,9 +599,8 @@ def get_cm_deal_id(
                                             left_on='deal_id',
                                             right_on='Deal - ID',
                                             how='left')
-    merge_pd_deal_id_df['all_deal_id'] = merge_pd_deal_id_df.groupby('phone_number')['deal_id'].transform(
-        lambda x: " | ".join(x.astype(str).unique()) if x.nunique() > 1 else str(x.iloc[0])
-    )
+    # Keep each Deal ID on its own row instead of combining IDs.
+    merge_pd_deal_id_df['all_deal_id'] = merge_pd_deal_id_df['deal_id']
     merge_pd_deal_id_df.drop(columns=['ntm_id', 'deal_id'], axis=1, inplace=True)
     merge_pd_deal_id_df.rename(columns={'Deal - ID': 'Deal ID'}, inplace=True)
 
@@ -933,7 +932,7 @@ def main():
         # phone_number_df = pd.read_csv(os.path.join(cm_db_path, 'phone_number.csv'), low_memory=False)
         # email_address_df = pd.read_csv(os.path.join(cm_db_path, 'email_address.csv'), low_memory=False)
         # serial_numbers_df = pd.read_csv(os.path.join(cm_db_path, 'serial_number.csv'), low_memory=False)
-        # cm_db_df = pd.read_csv(os.path.join(cm_db_path, 'cm_db.csv'), low_memory=False)
+        # cm_db_df = pd.read_csv(os.path.join(cm_db_path, 'ntm_db.csv'), low_memory=False)
         # # ----------- end here -----------   
         
         file_count = 1 # Counter for Abandoned Calls File
@@ -954,19 +953,8 @@ def main():
             )
             pipedrive_df['Person - Phone - Work'] = pipedrive_df['phone_number']
 
-            # Keep pipedrive_data.csv unchanged, but allow a BUDB phone to
-            # inherit a Pipedrive match from another phone on the same BUDB row.
-            pipedrive_df = add_related_bottoms_up_phones_to_pipedrive(
-                pipedrive_df,
-                bottoms_up_df
-            )
-
-            # Apply the same related-phone fallback to phone1-phone6 from the
-            # same NTM contact row.
-            pipedrive_df = add_related_ntm_phones_to_pipedrive(
-                pipedrive_df,
-                phone_number_df
-            )
+            # Keep original Pipedrive phones for direct matching.
+            pipedrive_direct_df = pipedrive_df.copy()
 
 
         # Iterate through list of abandoned_calls files
@@ -980,8 +968,76 @@ def main():
             abandoned_calls_df['Contact ID'] = abandoned_calls_df.index
 
             # Create Follow Up output file
-            ani_exist, ani_not_exist, df_exploded = search_ani(abandoned_calls_df, pipedrive_df)
-            log_step("Checking if PN exists in Pipedrive",
+            # Step 1: Search only the actual phones exported from Pipedrive.
+            direct_exist, direct_not_exist, direct_df_exploded = search_ani(
+                abandoned_calls_df,
+                pipedrive_direct_df.copy()
+            )
+
+            log_step(
+                "Checking if PN exists directly in Pipedrive",
+                **{
+                    "Direct PN Exist": direct_exist,
+                    "Direct PN Not Exist": direct_not_exist
+                }
+            )
+
+            # Defaults if no fallback is necessary
+            fallback_exist = pd.DataFrame()
+            fallback_not_exist = direct_not_exist.copy()
+            fallback_df_exploded = pd.DataFrame()
+
+            # Step 2: Only missing direct PNs are allowed to use sibling fallback
+            if not direct_not_exist.empty:
+
+                # Build a separate enriched copy.
+                fallback_pipedrive_df = pipedrive_direct_df.copy()
+
+                fallback_pipedrive_df = add_related_bottoms_up_phones_to_pipedrive(
+                    fallback_pipedrive_df,
+                    bottoms_up_df
+                )
+
+                fallback_pipedrive_df = add_related_ntm_phones_to_pipedrive(
+                    fallback_pipedrive_df,
+                    phone_number_df
+                )
+
+                fallback_calls_df = direct_not_exist[
+                    [
+                        'ANI',
+                        'Date and Time',
+                        'Team',
+                        'Date',
+                        'Time',
+                        'Contact ID',
+                        'Deal ID'
+                    ]
+                ].copy()
+
+                fallback_exist, fallback_not_exist, fallback_df_exploded = search_ani(
+                    fallback_calls_df,
+                    fallback_pipedrive_df
+                )
+
+            log_step(
+                "Checking if PN exists indirectly through sibling fallback",
+                **{
+                    "Indirect PN Exist": fallback_exist,
+                    "Indirect PN Not Exist": fallback_not_exist
+                }
+            )
+
+            ani_exist = pd.concat([direct_exist, fallback_exist], ignore_index=True)
+            ani_not_exist = fallback_not_exist
+
+            df_exploded = (
+                fallback_df_exploded
+                if not fallback_df_exploded.empty
+                else direct_df_exploded
+            )
+
+            log_step("Final PN matching result",
                 **{"PN Exist": ani_exist, "PN Not Exist": ani_not_exist})
 
             # Get Deal ID from cm database

@@ -460,7 +460,7 @@ def add_deal_category_from_budb_ids(
         bottoms_up_final_df: pd.DataFrame,
         bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add Deal - Category based on the Bottoms Up records whose IDs
+    Add Deal - Deal Size Category based on the Bottoms Up records whose IDs
     appear in Deal - BU Database ID.
 
     If multiple IDs have different nonblank categories, combine the
@@ -531,7 +531,7 @@ def add_deal_category_from_budb_ids(
 
         return ' | '.join(categories) if categories else pd.NA
 
-    result_df['Deal - Category'] = result_df.apply(
+    result_df['Deal - Deal Size Category'] = result_df.apply(
         get_categories,
         axis=1
     )
@@ -1325,7 +1325,11 @@ def add_constant_columns(cm_db_final_df: pd.DataFrame) -> pd.DataFrame:
     )
     cm_db_final_df['Deal - Deal Status'] = ''
     cm_db_final_df['Person - Timezone'] = ''
-    cm_db_final_df['Deal - Owner'] = 'Stephanie'
+    cm_db_final_df['Deal - Owner'] = cm_db_final_df['budb_id'].apply(
+        lambda x: 'Froi'
+        if pd.notna(x) and str(x).strip()
+        else 'Wilferine Co'
+    )
     cm_db_final_df['Deal - Marketing Medium'] = 'Text'
     cm_db_final_df.drop_duplicates(subset=['ANI'], inplace=True) # Remove duplicated ANI Numbers
 
@@ -1847,7 +1851,7 @@ def create_new_deals_cm(bottoms_up_not_exist: pd.DataFrame,
         'Deal - Deal creation date',
         'Deal - Offer Generated Date',
         'Deal - Title',
-        'Deal - Category',
+        'Deal - Deal Size Category',
         'Deal - Label',
         'Deal - Stage',
         'Deal - Owner',

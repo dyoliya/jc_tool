@@ -59,7 +59,7 @@ class App(customtkinter.CTk):
         """"""""""""""""""""""""
 
         # configure window
-        self.title("JC Tool v2.1.0")
+        self.title("JC Tool v2.1.1")
         self.geometry(self.center_main_window(800, 580))
         self.resizable(False, False)
         self.iconbitmap("misc/tool_icon.ico")

@@ -45,12 +45,8 @@ def search_ani(abandoned_df: pd.DataFrame, pipedrive_df: pd.DataFrame) -> 'tuple
     #                                             how='left')
     # pipedrive_final_data = pipedrive_final_data.drop_duplicates(subset=['Deal - ID', 'phone_number'])
 
-    # Group by 'phone_number' and aggregate 'Deal - ID' into a single string with unique IDs
-    deal_ids = df_exploded.groupby('phone_number')['Deal - ID']\
-        .agg(lambda x: " | ".join(map(str, pd.unique(x))))
-
-    # Map the aggregated deal IDs back to the original DataFrame
-    df_exploded['all_deal_id'] = df_exploded['phone_number'].map(deal_ids)
+    # Keep each matching Deal ID on its own row.
+    df_exploded['all_deal_id'] = df_exploded['Deal - ID']
 
     
     # Search existing ANI numbers in pipedrive final data
