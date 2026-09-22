@@ -1377,12 +1377,11 @@ def add_budb_deal_note(output_df: pd.DataFrame,
                        bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
     """Build one multiline deal note from the output row's BUDB IDs."""
     result_df = output_df.copy()
-    note_column = 'Note Content'
+    note_column = 'BUDB Note Content'
     id_column = 'Deal - BU Database ID'
 
-    # Preserve existing notes. Create the column only if it is missing.
-    if note_column not in result_df.columns:
-        result_df[note_column] = pd.NA
+    # Store offer details separately from the original Note Content.
+    result_df[note_column] = pd.NA
 
     if result_df.empty or id_column not in result_df.columns:
         return result_df
@@ -1483,7 +1482,6 @@ def add_budb_deal_note(output_df: pd.DataFrame,
         total = distinct_offers.sum(min_count=1)
 
         return (
-            "--------------------------------------------------\n\n"
             "As of this date, we are processing this deal as a bottoms up deal "
             "because we found a match in the BU database. "
             "The updated offer and details are as follows:\n\n"
@@ -1491,27 +1489,8 @@ def add_budb_deal_note(output_df: pd.DataFrame,
             + f"\n\nTotal Offers: {number(total, money=True)}"
         )
 
-    # Generate the BUDB text separately from the original note.
-    budb_notes = ids_per_row.map(build_note)
-
-    def append_note(original_note, budb_note):
-        # No BUDB text: retain the original value exactly.
-        if pd.isna(budb_note) or not str(budb_note).strip():
-            return original_note
-
-        # No original text: use the BUDB text by itself.
-        if pd.isna(original_note) or not str(original_note).strip():
-            return budb_note
-
-        # Preserve the original text and append after a blank line.
-        return f"{original_note}\n\n{budb_note}"
-
-    result_df[note_column] = [
-        append_note(original_note, budb_note)
-        for original_note, budb_note in zip(
-            result_df[note_column], budb_notes
-        )
-    ]
+    # Save the generated offer note in its own column.
+    result_df[note_column] = ids_per_row.map(build_note)
 
     return result_df
 
@@ -1573,6 +1552,7 @@ def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.D
         'Person - Phone',
         'Person - Phone 1',
         'Note Content',
+        'BUDB Note Content',
         'Person - Mailing Address - Data Source',
         'Person - Phone 1 - Data Source',
         'Person - Timezone',

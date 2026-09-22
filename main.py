@@ -309,6 +309,32 @@ def get_timezone_dict() -> dict:
     return timezone_dict
 
 
+def export_with_separate_notes(dataframe, output_path):
+    export_df = dataframe.copy()
+    offer_column = 'BUDB Note Content'
+
+    if offer_column in export_df.columns:
+        has_offer_notes = (
+            export_df[offer_column]
+            .fillna('')
+            .astype(str)
+            .str.strip()
+            .ne('')
+            .any()
+        )
+
+        # Omit the second note column if the whole file has no offer notes.
+        if not has_offer_notes:
+            export_df = export_df.drop(columns=[offer_column])
+
+    # Change only the exported headers, not the DataFrame column names.
+    headers = [
+        'Note Content' if column == offer_column else column
+        for column in export_df.columns
+    ]
+
+    export_df.to_excel(output_path, index=False, header=headers)
+
 def export_new_deals(bottoms_up_output: pd.DataFrame,
                      cm_db_output: pd.DataFrame,
                      rc_df: pd.DataFrame,
@@ -382,6 +408,7 @@ def export_new_deals(bottoms_up_output: pd.DataFrame,
         'Person - Phone',
         'Person - Phone 1',
         'Note Content',
+        'BUDB Note Content',        
         'Person - Mailing Address - Data Source',
         'Person - Phone 1 - Data Source',
         'Activity Note',
@@ -407,7 +434,7 @@ def export_new_deals(bottoms_up_output: pd.DataFrame,
     print(f"Creating {file_count}. NEW DEALS.xlsx file.")
     
     # Export dataframe as excel
-    new_deals_output.to_excel(f'output/new_deals/{file_count}. PIPEDRIVE IMPORT - NEW DEALS.xlsx', index=False)
+    export_with_separate_notes(new_deals_output, f'output/new_deals/{file_count}. PIPEDRIVE IMPORT - NEW DEALS.xlsx')
 
     # New deals in RC Data
     new_deal_df = pd.concat([bottoms_up_final, cm_db_final])
@@ -490,6 +517,7 @@ def export_rc_data(rc_df,
         'Person - Phone',
         'Person - Phone 1',
         'Note Content',
+        'BUDB Note Content',
         'Person - Mailing Address - Data Source',
         'Person - Phone 1 - Data Source',
         'Activity Note',
@@ -500,7 +528,7 @@ def export_rc_data(rc_df,
     ]]
 
     rc_final_output.sort_values(by='Contact ID', inplace=True)
-    rc_final_output.to_excel(f"output/rc_data/(Added New Deals) {file_name}", index=False)
+    export_with_separate_notes(rc_final_output, f"output/rc_data/(Added New Deals) {file_name}")
 
 
 def get_cm_deal_id(
