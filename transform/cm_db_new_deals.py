@@ -1,5 +1,6 @@
 import pandas as pd
 import os
+from transform.bottoms_up_new_deals import add_budb_deal_note
 
 
 def search_ani(bottoms_up_not_exist: pd.DataFrame, phone_number_df: pd.DataFrame) -> 'tuple[pd.DataFrame, pd.DataFrame]':
@@ -1927,6 +1928,9 @@ def create_new_deals_cm(bottoms_up_not_exist: pd.DataFrame,
         added_offer_generated_date_df = add_offer_generated_date(added_constants_df, bottoms_up_df, file_count)
         cm_db_final_df, cm_db_not_exist_final = filter_multiple_entries(added_offer_generated_date_df, cm_db_not_exist)
 
+
+        # Build the BUDB note using the final list of BUDB IDs.
+        cm_db_final_df = add_budb_deal_note(cm_db_final_df, bottoms_up_df)
 
         # Select columns that will be included in the final output data
         cm_db_final_output_data = cm_db_final_df[columns]

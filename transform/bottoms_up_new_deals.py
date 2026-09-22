@@ -361,11 +361,26 @@ def add_serial_group_fields(bottoms_up_exist: pd.DataFrame, bottoms_up_df: pd.Da
 
         # Final unique list:
         # serial-based IDs first, then additional Contact Group IDs.
-        serial_group_ids = (
-            " | ".join(ids_seen)
-            if ids_seen
-            else ""
-        )
+        # Rebuild the final IDs using only the selected contact group.
+        if serials and pd.notna(selected_contact_group_id):
+            ids_seen = (
+                bottoms_up_df.loc[
+                    bottoms_up_df['contact_group_id'].eq(
+                        selected_contact_group_id
+                    ),
+                    'id'
+                ]
+                .dropna()
+                .astype(str)
+                .drop_duplicates()
+                .tolist()
+            )
+
+        else:
+            # No contact group: retain only the first collected BUDB ID.
+            ids_seen = ids_seen[:1]
+
+        serial_group_ids = " | ".join(ids_seen)
 
         rows.append({
             'phone_number': phone,
@@ -1358,6 +1373,148 @@ def add_offer_generated_date(bottoms_up_exist: pd.DataFrame,
 
     return result_df
 
+def add_budb_deal_note(output_df: pd.DataFrame,
+                       bottoms_up_df: pd.DataFrame) -> pd.DataFrame:
+    """Build one multiline deal note from the output row's BUDB IDs."""
+    result_df = output_df.copy()
+    note_column = 'Note Content'
+    id_column = 'Deal - BU Database ID'
+
+    # Preserve existing notes. Create the column only if it is missing.
+    if note_column not in result_df.columns:
+        result_df[note_column] = pd.NA
+
+    if result_df.empty or id_column not in result_df.columns:
+        return result_df
+
+    def clean_text(value):
+        return '' if pd.isna(value) else str(value).strip()
+
+    def normalize_id(value):
+        text = clean_text(value)
+        return text[:-2] if text.endswith('.0') else text
+
+    def split_ids(value):
+        return list(dict.fromkeys(
+            normalize_id(item)
+            for item in clean_text(value).split('|')
+            if normalize_id(item)
+        ))
+
+    ids_per_row = result_df[id_column].map(split_ids)
+    needed_ids = {item for ids in ids_per_row for item in ids}
+
+    if not needed_ids:
+        return result_df
+
+    fields = [
+        'bu_category', 'value_low', 'no_of_interest',
+        'target_county', 'target_state', 'date_created',
+        'owner', 'is_latest_offer', 'sum_of_all_offers'
+    ]
+    missing_columns = sorted(set(['id'] + fields) - set(bottoms_up_df.columns))
+    if missing_columns:
+        raise ValueError(f"BUDB note: missing columns {missing_columns}")
+
+    # Keep only BUDB records needed by this output.
+    normalized_ids = (
+        bottoms_up_df['id'].astype('string').str.strip()
+        .str.replace(r'\.0$', '', regex=True)
+    )
+    matched = normalized_ids.isin(needed_ids)
+    lookup_df = bottoms_up_df.loc[matched, fields].copy()
+    lookup_df.index = normalized_ids.loc[matched]
+    lookup = lookup_df.to_dict(orient='index')
+
+    def number(value, money=False):
+        value = pd.to_numeric(value, errors='coerce')
+        if pd.isna(value):
+            return 'N/A'
+        text = f"{value:,.2f}".rstrip('0').rstrip('.')
+        return f"${text}" if money else text
+
+    def build_note(budb_ids):
+        if not budb_ids:
+            return pd.NA
+
+        missing_ids = [item for item in budb_ids if item not in lookup]
+        if missing_ids:
+            raise ValueError(f"BUDB note: IDs not found in bottoms_up: {missing_ids}")
+
+        lines = []
+        offer_values = []
+
+        for budb_id in budb_ids:
+            record = lookup[budb_id]
+
+            # Keep the total calculation across all listed BUDB IDs.
+            offer_values.append(record['sum_of_all_offers'])
+
+            # Include a detail line only for latest offers.
+            if clean_text(record['is_latest_offer']).upper() != 'Y':
+                continue
+
+            county = ', '.join(
+                clean_text(record[field])
+                for field in ['target_county', 'target_state']
+                if clean_text(record[field])
+            )
+            date = pd.to_datetime(record['date_created'], errors='coerce')
+            date_text = date.strftime('%Y-%m-%d') if pd.notna(date) else 'N/A'
+
+            lines.append(
+                f"{clean_text(record['bu_category'])}: "
+                f"{number(record['value_low'], money=True)} - "
+                f"{number(record['no_of_interest'])} INTEREST/S - "
+                f"{county} ({date_text}) - "
+                f"{clean_text(record['owner'])}"
+            )
+
+        # Leave the entire note blank if no listed records are latest offers.
+        if not lines:
+            return pd.NA
+        
+        # Add each distinct non-NULL offer amount once.
+        distinct_offers = (
+            pd.to_numeric(pd.Series(offer_values), errors='coerce')
+            .dropna()
+            .drop_duplicates()
+        )
+        total = distinct_offers.sum(min_count=1)
+
+        return (
+            "--------------------------------------------------\n\n"
+            "As of this date, we are processing this deal as a bottoms up deal "
+            "because we found a match in the BU database. "
+            "The updated offer and details are as follows:\n\n"
+            + '\n'.join(lines)
+            + f"\n\nTotal Offers: {number(total, money=True)}"
+        )
+
+    # Generate the BUDB text separately from the original note.
+    budb_notes = ids_per_row.map(build_note)
+
+    def append_note(original_note, budb_note):
+        # No BUDB text: retain the original value exactly.
+        if pd.isna(budb_note) or not str(budb_note).strip():
+            return original_note
+
+        # No original text: use the BUDB text by itself.
+        if pd.isna(original_note) or not str(original_note).strip():
+            return budb_note
+
+        # Preserve the original text and append after a blank line.
+        return f"{original_note}\n\n{budb_note}"
+
+    result_df[note_column] = [
+        append_note(original_note, budb_note)
+        for original_note, budb_note in zip(
+            result_df[note_column], budb_notes
+        )
+    ]
+
+    return result_df
+
 
 def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.DataFrame, file_count: int) -> 'tuple[pd.DataFrame, pd.DataFrame | None]':
     '''
@@ -1475,6 +1632,9 @@ def create_new_deals_bottoms_up(ani_not_exist: pd.DataFrame, bottoms_up_df: pd.D
         added_person_name_df = add_person_name(bottoms_up_exist, added_note_content_df)
         added_constants_df = add_constant_columns(added_person_name_df)
         bottoms_up_final_df, bottoms_up_not_exist_final = filter_multiple_entries(added_constants_df, bottoms_up_not_exist)
+        
+        # Append BUDB details to the existing Note Content.
+        bottoms_up_final_df = add_budb_deal_note(bottoms_up_final_df, bottoms_up_df)
         
         # Select columns that will be included in the final output data
         bottoms_up_final_output_data = bottoms_up_final_df[columns]
